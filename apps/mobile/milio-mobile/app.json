@@ -6,6 +6,21 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "platforms": ["ios", "android"],
-    "sdkVersion": "52.0.0"
+    "sdkVersion": "54.0.0",
+    "android": {
+      "package": "com.milio.app",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA"
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "com.milio.app",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Milio needs microphone access for voice input",
+        "NSSpeechRecognitionUsageDescription": "Milio uses speech recognition for voice commands"
+      }
+    },
+    "plugins": []
   }
 }
