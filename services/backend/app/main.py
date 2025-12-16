@@ -23,6 +23,19 @@ S3_REGION = os.environ.get("S3_REGION", "us-east-1")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
 
+# Milio's personality and rules
+SYSTEM_PROMPT = """You are Milio — a personal AI assistant.
+
+Your goals:
+- Be concise, practical, and helpful
+- When files are attached, analyze them deeply
+- If the user shows logs or errors, explain the root cause and give fixes
+- Ask clarifying questions only when useful
+- Do not mention being an AI model
+
+You can analyze images, documents, and code.
+"""
+
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev_secret_change_me")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -250,17 +263,20 @@ def download_file(file_id: str, sess=Depends(db), x_user_id: str = Depends(get_u
     })
 
 # ---------- Messages + Claude analysis ----------
-async def claude_analyze_message(content: str, attachment_blobs: list[dict]) -> str:
+async def claude_analyze_message(
+    content: str,
+    attachment_blobs: list[dict],
+    conversation_history: list[dict] = None
+) -> str:
     """
     attachment_blobs: list of { "type": "image"|"document"|"video"|"other", "content_type": ..., "bytes_b64": ... , "filename": ... }
+    conversation_history: list of {"role": "user"|"assistant", "content": "..."} for context
     For MVP: we send images + PDFs to Claude when possible, otherwise we just describe we stored it.
     """
     if not ANTHROPIC_API_KEY:
         return "Claude key not configured on server. Set ANTHROPIC_API_KEY."
 
-    # Build Anthropic Messages API payload (minimal)
-    # Note: For PDFs, Claude supports PDF inputs (pages converted to images) per their docs. :contentReference[oaicite:1]{index=1}
-    # We keep MVP simple: images + PDFs get sent; other types are acknowledged.
+    # Build content blocks for the new user message
     content_blocks = [{"type": "text", "text": content}]
 
     for att in attachment_blobs:
@@ -277,12 +293,26 @@ async def claude_analyze_message(content: str, attachment_blobs: list[dict]) -> 
             })
         else:
             content_blocks.append({"type": "text", "text": f"[Stored attachment: {att.get('filename','file')} ({att['content_type']})]"})
+
+    # Build conversation with history
+    messages = []
+
+    # Add conversation history (previous messages)
+    if conversation_history:
+        for msg in conversation_history:
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+
+    # Add the new user message with attachments
+    messages.append({"role": "user", "content": content_blocks})
+
     payload = {
         "model": ANTHROPIC_MODEL,
-        "max_tokens": 800,
-        "messages": [
-            {"role": "user", "content": content_blocks}
-        ]
+        "max_tokens": 1024,
+        "system": SYSTEM_PROMPT,
+        "messages": messages
     }
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -328,6 +358,17 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
     if not chat:
         raise HTTPException(404, "Chat not found")
 
+    # Load conversation history (last 20 messages for context)
+    history_rows = sess.execute(
+        text("""SELECT role, content FROM messages
+                WHERE chat_id=:c AND user_id=:u
+                ORDER BY created_at ASC
+                LIMIT 20"""),
+        {"c": chat_id, "u": x_user_id},
+    ).mappings().all()
+
+    conversation_history = [{"role": r["role"], "content": r["content"]} for r in history_rows]
+
     now = datetime.utcnow()
     mid_user = "m_" + uuid.uuid4().hex
     sess.execute(
@@ -361,7 +402,7 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
                 "bytes_b64": base64.b64encode(raw).decode("utf-8"),
             })
 
-    assistant_text = await claude_analyze_message(req.content, attachment_blobs)
+    assistant_text = await claude_analyze_message(req.content, attachment_blobs, conversation_history)
 
     mid_assistant = "m_" + uuid.uuid4().hex
     now2 = datetime.utcnow()
