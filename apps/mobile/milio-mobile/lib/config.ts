@@ -11,7 +11,7 @@
  */
 
 // Backend API URL - uses environment variable if set, otherwise defaults to localhost
-export const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:8000';
+export const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:8001';
 
 // Timeout for API requests in milliseconds
 export const API_TIMEOUT = 60000;
