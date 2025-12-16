@@ -5,22 +5,79 @@
     "scheme": "milio",
     "version": "0.1.0",
     "orientation": "portrait",
-    "platforms": ["ios", "android"],
+    "icon": "./assets/images/icon.png",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "platforms": [
+      "ios",
+      "android"
+    ],
     "sdkVersion": "54.0.0",
+    "splash": {
+      "image": "./assets/images/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#151718"
+    },
+    "updates": {
+      "enabled": false
+    },
+    "runtimeVersion": "0.1.0",
     "android": {
       "package": "com.milio.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#151718"
+      },
       "permissions": [
         "android.permission.RECORD_AUDIO",
-        "android.permission.CAMERA"
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
       ]
     },
     "ios": {
       "bundleIdentifier": "com.milio.app",
+      "supportsTablet": true,
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Milio needs microphone access for voice input",
-        "NSSpeechRecognitionUsageDescription": "Milio uses speech recognition for voice commands"
+        "NSSpeechRecognitionUsageDescription": "Milio uses speech recognition for voice commands",
+        "NSCameraUsageDescription": "Milio needs camera access to take photos for analysis",
+        "NSPhotoLibraryUsageDescription": "Milio needs photo library access to attach images"
       }
     },
-    "plugins": []
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#151718"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Milio accesses your photos to let you share images with the AI assistant.",
+          "cameraPermission": "Milio accesses your camera to let you take photos for analysis."
+        }
+      ],
+      [
+        "expo-document-picker",
+        {
+          "iCloudContainerEnvironment": "Production"
+        }
+      ]
+    ],
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "01d8f8ff-5582-44d9-87d8-0caefb8320f2"
+      }
+    },
+    "owner": "miliobro"
   }
 }

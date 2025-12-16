@@ -6,10 +6,53 @@ node_modules/
 # expo
 .expo/
 .expo-shared/
+dist/
+web-build/
 
-# env
+# Native builds
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# Environment files
 .env
+.env.local
+.env.*.local
+
+# Debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# Local Netlify folder
+.netlify
+
+# typescript
+*.tsbuildinfo
+
+# EAS
+.easignore
 
 # windows junk
 nul
 
+# Testing
+coverage/
+
+# Android build outputs
+android/app/build/
+android/.gradle/
+
+# iOS build outputs
+ios/build/
+ios/Pods/
