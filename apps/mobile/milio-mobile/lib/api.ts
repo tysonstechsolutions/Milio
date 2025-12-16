@@ -1,22 +1,9 @@
 import { API_URL } from './config';
-import * as SecureStore from 'expo-secure-store';
 
 let cachedUserId: string | null = null;
 
 export async function getUserId(): Promise<string> {
   if (cachedUserId) return cachedUserId;
-
-  // Try to load from secure storage first
-  try {
-    const stored = await SecureStore.getItemAsync('milio_user_id');
-    if (stored) {
-      cachedUserId = stored;
-      console.log(`[API] Loaded user ID from storage: ${cachedUserId}`);
-      return cachedUserId;
-    }
-  } catch (e) {
-    console.log('[API] SecureStore not available, using memory cache');
-  }
 
   console.log(`[API] Authenticating at ${API_URL}/auth/anon`);
 
@@ -31,13 +18,6 @@ export async function getUserId(): Promise<string> {
 
   const data = await res.json();
   cachedUserId = data.user_id;
-
-  // Persist to secure storage
-  try {
-    await SecureStore.setItemAsync('milio_user_id', cachedUserId);
-  } catch (e) {
-    console.log('[API] Could not persist user ID to storage');
-  }
 
   console.log(`[API] Got user ID: ${cachedUserId}`);
   return cachedUserId;
