@@ -25,7 +25,7 @@
     "android": {
       "package": "com.milio.app",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundColor": "#151718"
       },
       "permissions": [
