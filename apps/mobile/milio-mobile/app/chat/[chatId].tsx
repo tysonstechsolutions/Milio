@@ -12,6 +12,7 @@ import {
   Platform,
   useColorScheme,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, router } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
@@ -53,6 +54,7 @@ export default function ChatScreen() {
   const flatListRef = useRef<FlatList>(null);
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
+  const insets = useSafeAreaInsets();
 
   // Voice send handler - called when transcript is ready
   const handleVoiceSend = useCallback(async (text: string): Promise<string> => {
@@ -275,7 +277,7 @@ export default function ChatScreen() {
       keyboardVerticalOffset={90}
     >
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
         <Pressable onPress={() => router.back()} style={styles.backButton}>
           <Text style={styles.backText}>‹ Back</Text>
         </Pressable>
@@ -366,7 +368,7 @@ export default function ChatScreen() {
       )}
 
       {/* Input row */}
-      <View style={styles.inputRow}>
+      <View style={[styles.inputRow, { paddingBottom: Math.max(insets.bottom, 8) + 8 }]}>
         <Pressable onPress={takePhoto} style={styles.attachBtn} disabled={uploading || isVoiceActive}>
           <Text style={styles.attachIcon}>📷</Text>
         </Pressable>
@@ -425,7 +427,6 @@ const createStyles = (isDark: boolean) =>
       justifyContent: 'space-between',
       alignItems: 'center',
       paddingHorizontal: 16,
-      paddingTop: 50,
       paddingBottom: 12,
       backgroundColor: isDark ? '#1c1c1e' : '#fff',
       borderBottomWidth: 1,
@@ -535,7 +536,6 @@ const createStyles = (isDark: boolean) =>
     inputRow: {
       flexDirection: 'row',
       padding: 8,
-      paddingBottom: Platform.OS === 'ios' ? 24 : 8,
       backgroundColor: isDark ? '#1c1c1e' : '#fff',
       borderTopWidth: 1,
       borderColor: isDark ? '#333' : '#ddd',

@@ -98,13 +98,15 @@ export function useVoice({ onTranscript, onSend }: UseVoiceOptions) {
           }
         },
         onError: (error) => {
-          console.error('[Voice] Recognition error:', error);
-
-          // ERROR_NO_MATCH (7) and ERROR_SPEECH_TIMEOUT (6) are not critical
-          if (error.error !== 7 && error.error !== 6) {
-            Alert.alert('Voice Error', error.message);
+          // Non-critical errors: NO_MATCH (7), SPEECH_TIMEOUT (6), LANGUAGE_UNAVAILABLE (11)
+          const nonCriticalErrors = [6, 7, 11];
+          if (nonCriticalErrors.includes(error.error)) {
+            console.log('[Voice] Non-critical error (ignored):', error.error);
+            return; // Don't change state for non-critical errors
           }
 
+          console.error('[Voice] Recognition error:', error);
+          Alert.alert('Voice Error', error.message);
           setState('idle');
           setPartialText('');
         },

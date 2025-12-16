@@ -67,6 +67,17 @@ export function destroy(): void {
 // Dummy subscription for when module isn't available
 const dummySubscription: Subscription = { remove: () => {} };
 
+// Track active subscriptions to prevent duplicates
+let activeSubscriptions: Subscription[] = [];
+
+/**
+ * Remove all active subscriptions
+ */
+export function removeAllListeners(): void {
+  activeSubscriptions.forEach((sub) => sub.remove());
+  activeSubscriptions = [];
+}
+
 /**
  * Add listener for partial results (real-time transcription)
  */
@@ -128,36 +139,37 @@ export function startListening(options: {
   onError?: (error: SpeechError) => void;
   onStart?: () => void;
 }): () => void {
-  const subscriptions: Subscription[] = [];
+  // Clean up any previous listeners first
+  removeAllListeners();
 
   if (options.onPartialResult) {
-    subscriptions.push(
+    activeSubscriptions.push(
       addPartialResultListener((result) => options.onPartialResult!(result.text))
     );
   }
 
   if (options.onResult) {
-    subscriptions.push(
+    activeSubscriptions.push(
       addResultListener((result) => options.onResult!(result.text))
     );
   }
 
   if (options.onEnd) {
-    subscriptions.push(addEndListener(() => options.onEnd!()));
+    activeSubscriptions.push(addEndListener(() => options.onEnd!()));
   }
 
   if (options.onError) {
-    subscriptions.push(addErrorListener((error) => options.onError!(error)));
+    activeSubscriptions.push(addErrorListener((error) => options.onError!(error)));
   }
 
   if (options.onStart) {
-    subscriptions.push(addStartListener(() => options.onStart!()));
+    activeSubscriptions.push(addStartListener(() => options.onStart!()));
   }
 
   start();
 
   return () => {
-    subscriptions.forEach((sub) => sub.remove());
+    removeAllListeners();
     stop();
   };
 }
