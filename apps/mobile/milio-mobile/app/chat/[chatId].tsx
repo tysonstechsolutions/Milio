@@ -17,7 +17,9 @@ import { useLocalSearchParams, router } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as Speech from 'expo-speech';
-import { getMessages, sendMessage, uploadFile } from '@/lib/api';
+import EventSource from 'react-native-sse';
+import { getMessages, sendMessage, uploadFile, getUserId } from '@/lib/api';
+import { API_URL } from '@/lib/config';
 import { useVoice, VoiceState } from '@/lib/useVoice';
 
 type Message = {
@@ -52,11 +54,14 @@ export default function ChatScreen() {
   const [uploading, setUploading] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const flatListRef = useRef<FlatList>(null);
+  const eventSourceRef = useRef<EventSource<'message' | 'error'> | null>(null);
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
   const insets = useSafeAreaInsets();
 
   // Voice send handler - called when transcript is ready
+  // NOTE: Voice mode intentionally uses non-streaming endpoint to get full response
+  // before TTS. Streaming would cause speech to sound choppy/broken.
   const handleVoiceSend = useCallback(async (text: string): Promise<string> => {
     if (!chatId) return '';
 
@@ -70,6 +75,7 @@ export default function ChatScreen() {
     setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
 
     try {
+      // Use non-streaming endpoint for voice - we need full response before TTS
       const newMessages = await sendMessage(chatId, text);
       // Replace optimistic message with actual messages from server
       setMessages((prev) => {
@@ -128,6 +134,11 @@ export default function ChatScreen() {
     return () => {
       // Stop any speech
       Speech.stop();
+      // Close any open EventSource connection
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
     };
   }, []);
 
@@ -219,6 +230,7 @@ export default function ChatScreen() {
     const attachmentIds = pendingAttachments.map((a) => a.id);
     const content = input.trim() || (pendingAttachments.length > 0 ? 'Attached file(s)' : '');
 
+    // Optimistic user message
     const optimisticUser: Message = {
       id: `temp-user-${Date.now()}`,
       role: 'user',
@@ -232,18 +244,88 @@ export default function ChatScreen() {
     setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
 
     try {
-      const newMessages = await sendMessage(chatId!, content, attachmentIds);
-      // Replace optimistic message with actual messages from server
-      setMessages((prev) => {
-        const withoutOptimistic = prev.filter((m) => m.id !== optimisticUser.id);
-        return [...withoutOptimistic, ...newMessages];
+      // Close any existing EventSource connection
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+
+      // Get user ID for auth header
+      const userId = await getUserId();
+      const url = `${API_URL}/chats/${chatId}/stream`;
+
+      // Create EventSource for SSE streaming
+      const es = new EventSource<'message' | 'error'>(url, {
+        headers: {
+          'X-User-Id': userId,
+          'Content-Type': 'application/json',
+        },
+        method: 'POST',
+        body: JSON.stringify({ content, attachment_ids: attachmentIds }),
       });
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+
+      // Store ref for cleanup
+      eventSourceRef.current = es;
+
+      // Add a placeholder assistant message that we'll update with chunks
+      const tempAssistantId = `temp-assistant-${Date.now()}`;
+      const optimisticAssistant: Message = {
+        id: tempAssistantId,
+        role: 'assistant',
+        content: '',
+        attachments: [],
+      };
+      setMessages((prev) => [...prev, optimisticAssistant]);
+
+      es.addEventListener('message', (event) => {
+        if (event.data === '[DONE]') {
+          // Stream finished
+          es.close();
+          eventSourceRef.current = null;
+          setSending(false);
+        } else if (event.data) {
+          // Check for error
+          if (event.data.startsWith('{"error"')) {
+            try {
+              const errData = JSON.parse(event.data);
+              console.error('Stream error:', errData.error);
+              Alert.alert('Error', errData.error || 'Streaming failed');
+            } catch {
+              // Not JSON error, treat as content
+            }
+          } else {
+            // Append chunk to the assistant message content
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === tempAssistantId ? { ...m, content: m.content + event.data } : m
+              )
+            );
+          }
+          // Scroll to bottom on each new chunk
+          flatListRef.current?.scrollToEnd({ animated: true });
+        }
+      });
+
+      es.addEventListener('error', (err) => {
+        console.error('SSE error:', err);
+        es.close();
+        eventSourceRef.current = null;
+        setSending(false);
+        // If no content was received, show error
+        setMessages((prev) => {
+          const assistantMsg = prev.find((m) => m.id === tempAssistantId);
+          if (assistantMsg && !assistantMsg.content) {
+            Alert.alert('Connection Error', 'Failed to get response from server');
+            return prev.filter((m) => m.id !== tempAssistantId);
+          }
+          return prev;
+        });
+      });
     } catch (error) {
-      console.error('Send failed:', error);
+      console.error('Send (stream) failed:', error);
       Alert.alert('Send failed', error instanceof Error ? error.message : 'Unknown error');
+      // Remove optimistic messages on failure
       setMessages((prev) => prev.filter((m) => m.id !== optimisticUser.id));
-    } finally {
       setSending(false);
     }
   }

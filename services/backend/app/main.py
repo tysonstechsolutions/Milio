@@ -40,6 +40,7 @@ You can analyze images, documents, and code.
 """
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev_secret_change_me")
+GAS_API_KEY = os.environ.get("GAS_API_KEY", "")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
@@ -72,6 +73,140 @@ app.add_middleware(
 # Include routers
 from app.routes import stt
 app.include_router(stt.router)
+
+# ---------- Tool Functions ----------
+import time
+
+# Gas price cache (TTL: 1 hour)
+_GAS_CACHE = {"price": None, "ts": 0, "ttl": 3600}
+
+
+def get_average_gas_price(location: str = "US") -> float:
+    """Fetch current average gas price (per gallon) for the given location.
+    Uses in-memory cache to avoid hammering the API.
+    """
+    global _GAS_CACHE
+
+    # Check cache first
+    now = time.time()
+    if _GAS_CACHE["price"] is not None and (now - _GAS_CACHE["ts"]) < _GAS_CACHE["ttl"]:
+        return _GAS_CACHE["price"]
+
+    try:
+        if GAS_API_KEY:
+            # Example using API Ninjas gas price API
+            resp = httpx.get(
+                f"https://api.api-ninjas.com/v1/gasprices?country={location}",
+                headers={"X-Api-Key": GAS_API_KEY},
+                timeout=10
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                # API returns {"gasoline": 3.5, "diesel": 3.8, ...}
+                price = data.get("gasoline") or data.get("regular_gasoline")
+                if price:
+                    _GAS_CACHE["price"] = float(price)
+                    _GAS_CACHE["ts"] = now
+                    return _GAS_CACHE["price"]
+    except Exception as e:
+        print(f"Gas price fetch error: {e}")
+
+    # Fallback: use approximate current national average
+    fallback_price = 3.25
+    _GAS_CACHE["price"] = fallback_price
+    _GAS_CACHE["ts"] = now
+    return fallback_price
+
+
+def choose_best_order(orders: list[dict], mpg: float = 25.0, per_mile_cost: float = 0.0, gas_price: float = None) -> dict:
+    """Given a list of orders (each with distance (miles) and payout),
+    compute which order yields the best net profit."""
+    if gas_price is None:
+        gas_price = get_average_gas_price()
+
+    best_order = None
+    best_net = -float('inf')
+
+    for order in orders:
+        miles = order.get('miles') or order.get('distance') or 0
+        payout = order.get('payout') or order.get('pay') or 0
+        # Calculate fuel cost for this order
+        fuel_cost = (miles / mpg) * gas_price if mpg > 0 else 0
+        vehicle_cost = miles * per_mile_cost  # additional per-mile costs (maintenance, etc.)
+        net = payout - (fuel_cost + vehicle_cost)
+        order['net_profit'] = round(net, 2)
+        order['fuel_cost'] = round(fuel_cost, 2)
+        if net > best_net:
+            best_net = net
+            best_order = order
+
+    return best_order or {}
+
+
+def parse_orders_from_text(text: str) -> tuple[list[dict], float]:
+    """Parse order information from natural language text.
+    Looks for patterns like '$X for Y miles' or 'Y miles for $X'
+
+    Returns:
+        tuple: (list of orders, confidence score 0.0-1.0)
+    """
+    import re
+    orders = []
+    seen_values = set()  # Track unique order values to avoid duplicates
+
+    # Pattern: $X for Y miles or Y miles for $X
+    # Also: $X payout, Y miles | Y mi for $X | order: Y miles, $X
+    patterns = [
+        (r'\$(\d+(?:\.\d+)?)\s*(?:for|payout)?\s*(\d+(?:\.\d+)?)\s*(?:miles?|mi)', 'payout_first'),  # $20 for 10 miles
+        (r'(\d+(?:\.\d+)?)\s*(?:miles?|mi)\s*(?:for)?\s*\$(\d+(?:\.\d+)?)', 'miles_first'),  # 10 miles for $20
+        (r'(\d+(?:\.\d+)?)\s*(?:miles?|mi)[,\s]+\$(\d+(?:\.\d+)?)', 'miles_first'),  # 10 miles, $20
+    ]
+
+    for pattern, order_type in patterns:
+        matches = re.findall(pattern, text.lower())
+        for match in matches:
+            if order_type == 'payout_first':
+                payout, miles = float(match[0]), float(match[1])
+            else:
+                miles, payout = float(match[0]), float(match[1])
+
+            # Avoid duplicates
+            value_key = (miles, payout)
+            if value_key not in seen_values:
+                seen_values.add(value_key)
+                orders.append({
+                    "id": f"Order {len(orders) + 1}",
+                    "miles": miles,
+                    "payout": payout
+                })
+
+    # Calculate confidence based on parsing quality
+    confidence = 0.0
+    if len(orders) >= 2:
+        # Base confidence for finding multiple orders
+        confidence = 0.6
+
+        # Higher confidence if values are reasonable
+        reasonable_orders = all(
+            0.5 <= o["miles"] <= 100 and 1 <= o["payout"] <= 200
+            for o in orders
+        )
+        if reasonable_orders:
+            confidence += 0.2
+
+        # Higher confidence if orders are distinct
+        if len(orders) == len(seen_values):
+            confidence += 0.1
+
+        # Higher confidence if text explicitly mentions "order" or "spark"
+        if "order" in text.lower() or "spark" in text.lower():
+            confidence += 0.1
+
+    elif len(orders) == 1:
+        confidence = 0.3  # Low confidence with single order
+
+    return orders, min(confidence, 1.0)
+
 
 # ---------- DB bootstrap (MVP) ----------
 SCHEMA_SQL = """
@@ -113,6 +248,7 @@ CREATE TABLE IF NOT EXISTS apps (
   user_id TEXT NOT NULL,
   name TEXT NOT NULL,
   icon_emoji TEXT,
+  launch_url TEXT,
   created_at TIMESTAMP NOT NULL
 );
 
@@ -162,11 +298,13 @@ class MessageResponse(BaseModel):
 class AppCreateRequest(BaseModel):
     name: str
     icon_emoji: Optional[str] = "🧩"
+    launch_url: Optional[str] = None
 
 class AppResponse(BaseModel):
     id: str
     name: str
     icon_emoji: Optional[str]
+    launch_url: Optional[str] = None
     created_at: datetime
 
 class AppGenerateRequest(BaseModel):
@@ -443,12 +581,160 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
         },
     )
 
+    # ---------- Tool Detection and Invocation ----------
+    user_text = req.content.lower()
+
+    # Detect Spark driver order optimization queries
+    is_order_query = (
+        ("which order" in user_text or "best order" in user_text or "should i take" in user_text)
+        and ("spark" in user_text or "order" in user_text or "delivery" in user_text or "miles" in user_text)
+    )
+
+    if is_order_query:
+        # Try to parse orders from the message with confidence scoring
+        orders, confidence = parse_orders_from_text(req.content)
+
+        # Minimum confidence threshold for automatic processing
+        CONFIDENCE_THRESHOLD = 0.6
+
+        if orders and len(orders) >= 2 and confidence >= CONFIDENCE_THRESHOLD:
+            # High confidence - proceed with calculation
+            gas_price = get_average_gas_price()
+            best = choose_best_order(orders, mpg=25.0, per_mile_cost=0.08, gas_price=gas_price)
+
+            if best:
+                # Build all orders summary
+                all_orders_summary = "\n".join([
+                    f"• {o['id']}: {o.get('miles')} miles, ${o.get('payout')} pay → Net: ${o.get('net_profit', 0):.2f} (fuel cost: ${o.get('fuel_cost', 0):.2f})"
+                    for o in orders
+                ])
+
+                recommendation = (
+                    f"Based on current gas prices (~${gas_price:.2f}/gal) and assuming 25 MPG with $0.08/mile vehicle costs:\n\n"
+                    f"{all_orders_summary}\n\n"
+                    f"**Recommendation: {best['id']}** is your best choice with a net profit of **${best['net_profit']:.2f}**.\n\n"
+                    f"This {best.get('miles')} mile trip for ${best.get('payout')} gives you the highest earnings after accounting for fuel (${best.get('fuel_cost', 0):.2f}) and vehicle costs."
+                )
+
+                # Save assistant reply to DB
+                mid_assistant = "m_" + uuid.uuid4().hex
+                now2 = datetime.utcnow()
+                sess.execute(
+                    text("""INSERT INTO messages (id, chat_id, user_id, role, content, attachments_json, created_at)
+                            VALUES (:id,:chat_id,:user_id,:role,:content,:att,:created_at)"""),
+                    {
+                        "id": mid_assistant,
+                        "chat_id": chat_id,
+                        "user_id": x_user_id,
+                        "role": "assistant",
+                        "content": recommendation,
+                        "att": json.dumps([]),
+                        "created_at": now2,
+                    },
+                )
+                sess.commit()
+
+                # Auto-generate title for new chats
+                if len(conversation_history) == 0 and chat["title"] == "New Chat":
+                    new_title = await generate_chat_title(req.content, recommendation)
+                    sess.execute(
+                        text("UPDATE chats SET title=:t WHERE id=:c"),
+                        {"t": new_title, "c": chat_id},
+                    )
+                    sess.commit()
+
+                return [
+                    {"id": mid_user, "role": "user", "content": req.content, "attachments": req.attachment_ids, "created_at": now},
+                    {"id": mid_assistant, "role": "assistant", "content": recommendation, "attachments": [], "created_at": now2},
+                ]
+
+        elif orders and confidence < CONFIDENCE_THRESHOLD:
+            # Low confidence - ask for clarification
+            clarification = (
+                "I found some order information but I'm not fully confident in the details. "
+                "Could you please confirm the orders in this format?\n\n"
+                "**Order 1:** [miles] miles for $[payout]\n"
+                "**Order 2:** [miles] miles for $[payout]\n\n"
+                "For example: 'Order 1: 10 miles for $20, Order 2: 8 miles for $15'"
+            )
+
+            if orders:
+                # Show what we found for confirmation
+                found_orders = "\n".join([f"• {o['id']}: {o['miles']} miles, ${o['payout']}" for o in orders])
+                clarification = (
+                    f"I found these possible orders, but I want to make sure I have them right:\n\n"
+                    f"{found_orders}\n\n"
+                    f"Can you confirm these are correct, or provide the exact details?"
+                )
+
+            mid_assistant = "m_" + uuid.uuid4().hex
+            now2 = datetime.utcnow()
+            sess.execute(
+                text("""INSERT INTO messages (id, chat_id, user_id, role, content, attachments_json, created_at)
+                        VALUES (:id,:chat_id,:user_id,:role,:content,:att,:created_at)"""),
+                {
+                    "id": mid_assistant,
+                    "chat_id": chat_id,
+                    "user_id": x_user_id,
+                    "role": "assistant",
+                    "content": clarification,
+                    "att": json.dumps([]),
+                    "created_at": now2,
+                },
+            )
+            sess.commit()
+
+            return [
+                {"id": mid_user, "role": "user", "content": req.content, "attachments": req.attachment_ids, "created_at": now},
+                {"id": mid_assistant, "role": "assistant", "content": clarification, "attachments": [], "created_at": now2},
+            ]
+
+    # Detect gas price query
+    if "gas price" in user_text or "fuel price" in user_text or "cost of gas" in user_text:
+        gas_price = get_average_gas_price()
+        gas_response = f"The current average gas price is approximately **${gas_price:.2f} per gallon**.\n\nThis is the national average and may vary by location. Would you like me to help calculate costs for a specific trip?"
+
+        mid_assistant = "m_" + uuid.uuid4().hex
+        now2 = datetime.utcnow()
+        sess.execute(
+            text("""INSERT INTO messages (id, chat_id, user_id, role, content, attachments_json, created_at)
+                    VALUES (:id,:chat_id,:user_id,:role,:content,:att,:created_at)"""),
+            {
+                "id": mid_assistant,
+                "chat_id": chat_id,
+                "user_id": x_user_id,
+                "role": "assistant",
+                "content": gas_response,
+                "att": json.dumps([]),
+                "created_at": now2,
+            },
+        )
+        sess.commit()
+
+        if len(conversation_history) == 0 and chat["title"] == "New Chat":
+            new_title = await generate_chat_title(req.content, gas_response)
+            sess.execute(
+                text("UPDATE chats SET title=:t WHERE id=:c"),
+                {"t": new_title, "c": chat_id},
+            )
+            sess.commit()
+
+        return [
+            {"id": mid_user, "role": "user", "content": req.content, "attachments": req.attachment_ids, "created_at": now},
+            {"id": mid_assistant, "role": "assistant", "content": gas_response, "attachments": [], "created_at": now2},
+        ]
+
+    # ---------- Standard Claude Analysis ----------
     # Load attachments bytes for Claude (only images + PDFs in MVP)
     attachment_blobs = []
     if req.attachment_ids:
+        # Use IN clause with dynamic placeholders for compatibility
+        placeholders = ",".join([f":id{i}" for i in range(len(req.attachment_ids))])
+        params = {"u": x_user_id}
+        params.update({f"id{i}": aid for i, aid in enumerate(req.attachment_ids)})
         rows = sess.execute(
-            text("SELECT id, filename, content_type, s3_key FROM files WHERE user_id=:u AND id = ANY(:ids)"),
-            {"u": x_user_id, "ids": req.attachment_ids},
+            text(f"SELECT id, filename, content_type, s3_key FROM files WHERE user_id=:u AND id IN ({placeholders})"),
+            params,
         ).mappings().all()
         for r in rows:
             obj = s3.get_object(Bucket=S3_BUCKET, Key=r["s3_key"])
@@ -511,25 +797,268 @@ def list_messages(chat_id: str, sess=Depends(db), x_user_id: str = Depends(get_u
         })
     return out
 
+
+# ---------- Streaming Messages ----------
+@app.post("/chats/{chat_id}/stream")
+async def stream_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+    """Stream the assistant's response token-by-token using Server-Sent Events."""
+    # (1) Verify chat exists
+    chat = sess.execute(
+        text("SELECT id, title FROM chats WHERE id=:c AND user_id=:u"),
+        {"c": chat_id, "u": x_user_id},
+    ).mappings().first()
+    if not chat:
+        raise HTTPException(404, "Chat not found")
+
+    # Load conversation history (most recent 20 messages for context)
+    history_rows = sess.execute(
+        text("""SELECT role, content FROM messages
+                WHERE chat_id=:c AND user_id=:u
+                ORDER BY created_at DESC
+                LIMIT 20"""),
+        {"c": chat_id, "u": x_user_id},
+    ).mappings().all()
+    conversation_history = [{"role": r["role"], "content": r["content"]} for r in reversed(history_rows)]
+
+    # (2) Save the user message to DB
+    mid_user = "m_" + uuid.uuid4().hex
+    now = datetime.utcnow()
+    sess.execute(
+        text("""INSERT INTO messages (id, chat_id, user_id, role, content, attachments_json, created_at)
+                VALUES (:id, :chat, :user, :role, :content, :att, :created)"""),
+        {
+            "id": mid_user,
+            "chat": chat_id,
+            "user": x_user_id,
+            "role": "user",
+            "content": req.content,
+            "att": json.dumps(req.attachment_ids),
+            "created": now,
+        },
+    )
+    sess.commit()
+
+    # (3) Prepare attachments for AI
+    attachment_blobs = []
+    if req.attachment_ids:
+        # Use IN clause with tuple for SQLite/PostgreSQL compatibility
+        placeholders = ",".join([f":id{i}" for i in range(len(req.attachment_ids))])
+        params = {"u": x_user_id}
+        params.update({f"id{i}": aid for i, aid in enumerate(req.attachment_ids)})
+        rows = sess.execute(
+            text(f"SELECT id, filename, content_type, s3_key FROM files WHERE user_id=:u AND id IN ({placeholders})"),
+            params,
+        ).mappings().all()
+        for r in rows:
+            obj = s3.get_object(Bucket=S3_BUCKET, Key=r["s3_key"])
+            raw = obj["Body"].read()
+            attachment_blobs.append({
+                "type": guess_attachment_type(r["content_type"]),
+                "content_type": r["content_type"],
+                "filename": r["filename"],
+                "bytes_b64": base64.b64encode(raw).decode("utf-8"),
+            })
+
+    # (4) Build Claude API payload
+    content_blocks = [{"type": "text", "text": req.content}]
+    for att in attachment_blobs:
+        if att["type"] == "image":
+            content_blocks.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": att["content_type"], "data": att["bytes_b64"]}
+            })
+        elif att["type"] == "document" and att["content_type"] == "application/pdf":
+            content_blocks.append({
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": att["bytes_b64"]},
+                "title": att.get("filename") or "document.pdf"
+            })
+        else:
+            content_blocks.append({"type": "text", "text": f"[Stored attachment: {att.get('filename','file')} ({att['content_type']})]"})
+
+    messages = []
+    for msg in conversation_history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": content_blocks})
+
+    payload = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 1024,
+        "stream": True,
+        "system": SYSTEM_PROMPT,
+        "messages": messages
+    }
+
+    # Store references for the generator closure
+    user_id_ref = x_user_id
+    chat_id_ref = chat_id
+    is_first_message = len(conversation_history) == 0 and chat["title"] == "New Chat"
+    user_content = req.content
+
+    async def response_generator():
+        full_response = ""
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream(
+                    "POST",
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": ANTHROPIC_API_KEY,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json=payload,
+                ) as response:
+                    if response.status_code >= 400:
+                        error_text = await response.aread()
+                        yield f"data: {{\"error\": \"API error: {response.status_code}\"}}\n\n"
+                        return
+
+                    buffer = ""
+                    async for chunk in response.aiter_text():
+                        buffer += chunk
+                        # Process complete SSE events from buffer
+                        while "\n\n" in buffer:
+                            event_end = buffer.index("\n\n")
+                            event_data = buffer[:event_end]
+                            buffer = buffer[event_end + 2:]
+
+                            # Parse the SSE event
+                            for line in event_data.split("\n"):
+                                if line.startswith("data: "):
+                                    json_str = line[6:]
+                                    try:
+                                        data = json.loads(json_str)
+                                        event_type = data.get("type", "")
+
+                                        if event_type == "content_block_delta":
+                                            delta = data.get("delta", {})
+                                            if delta.get("type") == "text_delta":
+                                                text = delta.get("text", "")
+                                                full_response += text
+                                                # Escape for JSON and send
+                                                escaped_text = json.dumps(text)[1:-1]  # Remove outer quotes
+                                                yield f"data: {escaped_text}\n\n"
+
+                                        elif event_type == "message_stop":
+                                            pass  # Will be handled after loop
+
+                                    except json.JSONDecodeError:
+                                        pass  # Ignore malformed JSON
+
+        except Exception as e:
+            print(f"[Streaming Error] {e}")
+            yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+
+        # Save assistant message to DB after streaming completes
+        if full_response:
+            try:
+                with SessionLocal() as save_sess:
+                    mid_assistant = "m_" + uuid.uuid4().hex
+                    now2 = datetime.utcnow()
+                    save_sess.execute(
+                        text("""INSERT INTO messages (id, chat_id, user_id, role, content, attachments_json, created_at)
+                                VALUES (:id, :chat, :user, :role, :content, :att, :created)"""),
+                        {
+                            "id": mid_assistant,
+                            "chat": chat_id_ref,
+                            "user": user_id_ref,
+                            "role": "assistant",
+                            "content": full_response,
+                            "att": json.dumps([]),
+                            "created": now2,
+                        },
+                    )
+                    save_sess.commit()
+
+                    # Auto-generate title for new chats
+                    if is_first_message:
+                        try:
+                            # Use synchronous httpx for title generation in this context
+                            with httpx.Client(timeout=30) as title_client:
+                                resp = title_client.post(
+                                    "https://api.anthropic.com/v1/messages",
+                                    headers={
+                                        "x-api-key": ANTHROPIC_API_KEY,
+                                        "anthropic-version": "2023-06-01",
+                                        "content-type": "application/json",
+                                    },
+                                    json={
+                                        "model": "claude-3-5-haiku-latest",
+                                        "max_tokens": 20,
+                                        "messages": [
+                                            {
+                                                "role": "user",
+                                                "content": f"Generate a 2-4 word title for this conversation. Reply with ONLY the title, no quotes or punctuation.\n\nUser: {user_content[:200]}\nAssistant: {full_response[:200]}"
+                                            }
+                                        ],
+                                    },
+                                )
+                                if resp.status_code == 200:
+                                    data = resp.json()
+                                    new_title = data["content"][0]["text"].strip().strip('"\'').title()
+                                    if len(new_title) > 50:
+                                        new_title = new_title[:47] + "..."
+                                    save_sess.execute(
+                                        text("UPDATE chats SET title=:t WHERE id=:c"),
+                                        {"t": new_title, "c": chat_id_ref},
+                                    )
+                                    save_sess.commit()
+                        except Exception as title_err:
+                            print(f"[Title Generation Error] {title_err}")
+
+            except Exception as save_err:
+                print(f"[Save Message Error] {save_err}")
+
+        yield "data: [DONE]\n\n"
+
+    # (5) Return SSE streaming response
+    return StreamingResponse(
+        response_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
 # ---------- App Library ----------
 @app.post("/apps", response_model=AppResponse)
 def create_app(req: AppCreateRequest, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
     aid = "a_" + uuid.uuid4().hex
     now = datetime.utcnow()
     sess.execute(
-        text("INSERT INTO apps (id, user_id, name, icon_emoji, created_at) VALUES (:id,:u,:n,:i,:t)"),
-        {"id": aid, "u": x_user_id, "n": req.name, "i": req.icon_emoji, "t": now},
+        text("INSERT INTO apps (id, user_id, name, icon_emoji, launch_url, created_at) VALUES (:id,:u,:n,:i,:url,:t)"),
+        {"id": aid, "u": x_user_id, "n": req.name, "i": req.icon_emoji, "url": req.launch_url, "t": now},
     )
     sess.commit()
-    return {"id": aid, "name": req.name, "icon_emoji": req.icon_emoji, "created_at": now}
+    return {"id": aid, "name": req.name, "icon_emoji": req.icon_emoji, "launch_url": req.launch_url, "created_at": now}
 
 @app.get("/apps", response_model=List[AppResponse])
 def list_apps(sess=Depends(db), x_user_id: str = Depends(get_user_id)):
     rows = sess.execute(
-        text("SELECT id, name, icon_emoji, created_at FROM apps WHERE user_id=:u ORDER BY created_at DESC"),
+        text("SELECT id, name, icon_emoji, launch_url, created_at FROM apps WHERE user_id=:u ORDER BY created_at DESC"),
         {"u": x_user_id},
     ).mappings().all()
     return [dict(r) for r in rows]
+
+@app.get("/apps/{app_id}/versions")
+def list_app_versions(app_id: str, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+    """List all versions of an app."""
+    # Verify app ownership
+    app_row = sess.execute(
+        text("SELECT id FROM apps WHERE id=:a AND user_id=:u"),
+        {"a": app_id, "u": x_user_id},
+    ).first()
+    if not app_row:
+        raise HTTPException(404, "App not found")
+
+    rows = sess.execute(
+        text("SELECT id, prompt, created_at FROM app_versions WHERE app_id=:a AND user_id=:u ORDER BY created_at ASC"),
+        {"a": app_id, "u": x_user_id},
+    ).mappings().all()
+    return [{"id": r["id"], "prompt": r["prompt"], "created_at": r["created_at"]} for r in rows]
 
 APP_HTML_SHELL = """<!doctype html>
 <html>
@@ -538,18 +1067,71 @@ APP_HTML_SHELL = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:;">
   <title>Milio App</title>
-  <style>body{font-family:system-ui;margin:0;padding:16px}</style>
+  <style>
+    body { font-family: system-ui; margin: 0; padding: 16px; }
+    .milio-error {
+      background: #fee;
+      border: 1px solid #c33;
+      border-radius: 8px;
+      padding: 16px;
+      margin: 20px 0;
+      color: #900;
+    }
+    .milio-error h3 { margin: 0 0 8px 0; }
+    .milio-error pre {
+      background: #fff;
+      padding: 8px;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+  </style>
 </head>
 <body>
 <div id="app"></div>
 <script>
   // Minimal Milio SDK (MVP): send messages to React Native via postMessage
   window.Milio = {
-    notify: (msg) => window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({type:'notify', msg}))
+    notify: (msg) => {
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({type:'notify', msg}));
+      }
+    },
+    error: (err) => {
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({type:'error', message: err.message || String(err), stack: err.stack}));
+      }
+    }
+  };
+
+  // Global error handler
+  window.onerror = function(message, source, lineno, colno, error) {
+    console.error('App error:', message, source, lineno, colno, error);
+    var errDiv = document.createElement('div');
+    errDiv.className = 'milio-error';
+    errDiv.innerHTML = '<h3>Something went wrong</h3>' +
+      '<p>' + (message || 'Unknown error') + '</p>' +
+      '<pre>' + (error && error.stack ? error.stack : 'No stack trace') + '</pre>';
+    document.getElementById('app').innerHTML = '';
+    document.getElementById('app').appendChild(errDiv);
+    window.Milio.error(error || {message: message});
+    return true; // Prevents default browser error handling
+  };
+
+  // Catch unhandled promise rejections
+  window.onunhandledrejection = function(event) {
+    console.error('Unhandled rejection:', event.reason);
+    window.Milio.error(event.reason || {message: 'Unhandled promise rejection'});
   };
 </script>
 <script>
+try {
 __APP_JS__
+} catch (e) {
+  window.onerror(e.message, '', 0, 0, e);
+}
 </script>
 </body>
 </html>

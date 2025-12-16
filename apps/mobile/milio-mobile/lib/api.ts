@@ -1,9 +1,22 @@
 import { API_URL } from './config';
+import * as SecureStore from 'expo-secure-store';
 
 let cachedUserId: string | null = null;
 
-async function getUserId(): Promise<string> {
+export async function getUserId(): Promise<string> {
   if (cachedUserId) return cachedUserId;
+
+  // Try to load from secure storage first
+  try {
+    const stored = await SecureStore.getItemAsync('milio_user_id');
+    if (stored) {
+      cachedUserId = stored;
+      console.log(`[API] Loaded user ID from storage: ${cachedUserId}`);
+      return cachedUserId;
+    }
+  } catch (e) {
+    console.log('[API] SecureStore not available, using memory cache');
+  }
 
   console.log(`[API] Authenticating at ${API_URL}/auth/anon`);
 
@@ -18,6 +31,14 @@ async function getUserId(): Promise<string> {
 
   const data = await res.json();
   cachedUserId = data.user_id;
+
+  // Persist to secure storage
+  try {
+    await SecureStore.setItemAsync('milio_user_id', cachedUserId);
+  } catch (e) {
+    console.log('[API] Could not persist user ID to storage');
+  }
+
   console.log(`[API] Got user ID: ${cachedUserId}`);
   return cachedUserId;
 }
@@ -131,5 +152,71 @@ export async function uploadFile(
   const data = await res.json();
   console.log(`[API] File uploaded:`, data);
   return data;
+}
+
+// ---------- Apps API ----------
+export type AppItem = {
+  id: string;
+  name: string;
+  icon_emoji: string;
+  launch_url?: string;
+  created_at: string;
+};
+
+export type AppVersion = {
+  id: string;
+  prompt: string;
+  created_at: string;
+};
+
+export async function getApps(): Promise<AppItem[]> {
+  const res = await apiFetch('/apps');
+  if (!res.ok) {
+    throw new Error('Failed to load apps');
+  }
+  return res.json();
+}
+
+export async function createApp(
+  name: string,
+  launchUrl?: string,
+  iconEmoji?: string
+): Promise<AppItem> {
+  const res = await apiFetch('/apps', {
+    method: 'POST',
+    body: JSON.stringify({
+      name,
+      icon_emoji: iconEmoji || '🧩',
+      launch_url: launchUrl || null,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Create app failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function generateApp(
+  appId: string,
+  prompt: string
+): Promise<{ version_id: string; run_url: string }> {
+  const res = await apiFetch('/apps/generate', {
+    method: 'POST',
+    body: JSON.stringify({ app_id: appId, prompt }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`App generation failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+export async function getAppVersions(appId: string): Promise<AppVersion[]> {
+  const res = await apiFetch(`/apps/${appId}/versions`);
+  if (!res.ok) {
+    throw new Error('Failed to load app versions');
+  }
+  return res.json();
 }
 
