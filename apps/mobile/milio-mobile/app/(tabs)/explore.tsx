@@ -1,112 +1,156 @@
-import { Image } from 'react-native';
-import { Platform, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, useColorScheme, Pressable, Alert, Linking } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Collapsible } from '@/components/ui/collapsible';
-import { ExternalLink } from '@/components/external-link';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Fonts } from '@/constants/theme';
+type SettingItem = {
+  id: string;
+  title: string;
+  subtitle?: string;
+  icon: string;
+  action?: () => void;
+};
 
-export default function TabTwoScreen() {
+export default function SettingsScreen() {
+  const colorScheme = useColorScheme();
+  const isDark = colorScheme === 'dark';
+  const insets = useSafeAreaInsets();
+  const styles = createStyles(isDark);
+
+  const settings: SettingItem[] = [
+    {
+      id: 'about',
+      title: 'About Milio',
+      subtitle: 'Version 0.1.0',
+      icon: 'M',
+      action: () => {
+        Alert.alert('Milio', 'Your AI assistant powered by Claude.\n\nVersion 0.1.0');
+      },
+    },
+    {
+      id: 'privacy',
+      title: 'Privacy Policy',
+      icon: '🔒',
+      action: () => {
+        Alert.alert('Privacy', 'Your conversations are stored securely and never shared.');
+      },
+    },
+    {
+      id: 'feedback',
+      title: 'Send Feedback',
+      icon: '💬',
+      action: () => {
+        Linking.openURL('mailto:feedback@example.com?subject=Milio%20Feedback');
+      },
+    },
+    {
+      id: 'clear-data',
+      title: 'Clear Chat History',
+      subtitle: 'Delete all chats and messages',
+      icon: '🗑️',
+      action: () => {
+        Alert.alert(
+          'Clear History',
+          'Are you sure you want to delete all chats? This cannot be undone.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Delete All',
+              style: 'destructive',
+              onPress: () => Alert.alert('Not implemented', 'This feature is coming soon.'),
+            },
+          ]
+        );
+      },
+    },
+  ];
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#D0D0D0', dark: '#353636' }}
-      headerImage={
-        <IconSymbol
-          size={310}
-          color="#808080"
-          name="chevron.left.forwardslash.chevron.right"
-          style={styles.headerImage}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText
-          type="title"
-          style={{
-            fontFamily: Fonts.rounded,
-          }}>
-          Explore
-        </ThemedText>
-      </ThemedView>
-      <ThemedText>This app includes example code to help you get started.</ThemedText>
-      <Collapsible title="File-based routing">
-        <ThemedText>
-          This app has two screens:{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/explore.tsx</ThemedText>
-        </ThemedText>
-        <ThemedText>
-          The layout file in <ThemedText type="defaultSemiBold">app/(tabs)/_layout.tsx</ThemedText>{' '}
-          sets up the tab navigator.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/router/introduction">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Android, iOS, and web support">
-        <ThemedText>
-          You can open this project on Android, iOS, and the web. To open the web version, press{' '}
-          <ThemedText type="defaultSemiBold">w</ThemedText> in the terminal running this project.
-        </ThemedText>
-      </Collapsible>
-      <Collapsible title="Images">
-        <ThemedText>
-          For static images, you can use the <ThemedText type="defaultSemiBold">@2x</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">@3x</ThemedText> suffixes to provide files for
-          different screen densities
-        </ThemedText>
-        <Image
-          source={require('@/assets/images/react-logo.png')}
-          style={{ width: 100, height: 100, alignSelf: 'center' }}
-        />
-        <ExternalLink href="https://reactnative.dev/docs/images">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Light and dark mode components">
-        <ThemedText>
-          This template has light and dark mode support. The{' '}
-          <ThemedText type="defaultSemiBold">useColorScheme()</ThemedText> hook lets you inspect
-          what the user&apos;s current color scheme is, and so you can adjust UI colors accordingly.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Animations">
-        <ThemedText>
-          This template includes an example of an animated component. The{' '}
-          <ThemedText type="defaultSemiBold">components/HelloWave.tsx</ThemedText> component uses
-          the powerful{' '}
-          <ThemedText type="defaultSemiBold" style={{ fontFamily: Fonts.mono }}>
-            react-native-reanimated
-          </ThemedText>{' '}
-          library to create a waving hand animation.
-        </ThemedText>
-        {Platform.select({
-          ios: (
-            <ThemedText>
-              The <ThemedText type="defaultSemiBold">components/ParallaxScrollView.tsx</ThemedText>{' '}
-              component provides a parallax effect for the header image.
-            </ThemedText>
-          ),
-        })}
-      </Collapsible>
-    </ParallaxScrollView>
+    <View style={styles.container}>
+      <View style={[styles.header, { paddingTop: insets.top + 20 }]}>
+        <Text style={styles.title}>Settings</Text>
+      </View>
+
+      <View style={styles.content}>
+        {settings.map((item) => (
+          <Pressable
+            key={item.id}
+            style={({ pressed }) => [styles.settingItem, pressed && styles.settingItemPressed]}
+            onPress={item.action}
+          >
+            <View style={styles.settingIcon}>
+              <Text style={styles.settingIconText}>{item.icon}</Text>
+            </View>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingTitle}>{item.title}</Text>
+              {item.subtitle && <Text style={styles.settingSubtitle}>{item.subtitle}</Text>}
+            </View>
+            <Text style={styles.chevron}>›</Text>
+          </Pressable>
+        ))}
+      </View>
+    </View>
   );
 }
 
-const styles = StyleSheet.create({
-  headerImage: {
-    color: '#808080',
-    bottom: -90,
-    left: -35,
-    position: 'absolute',
-  },
-  titleContainer: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-});
+const createStyles = (isDark: boolean) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: isDark ? '#000' : '#f5f5f5',
+    },
+    header: {
+      paddingHorizontal: 20,
+      paddingBottom: 20,
+      backgroundColor: isDark ? '#1c1c1e' : '#fff',
+      borderBottomWidth: 1,
+      borderBottomColor: isDark ? '#333' : '#e0e0e0',
+    },
+    title: {
+      fontSize: 28,
+      fontWeight: 'bold',
+      color: isDark ? '#fff' : '#000',
+    },
+    content: {
+      padding: 12,
+    },
+    settingItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: isDark ? '#1c1c1e' : '#fff',
+      padding: 16,
+      borderRadius: 12,
+      marginBottom: 8,
+    },
+    settingItemPressed: {
+      opacity: 0.7,
+    },
+    settingIcon: {
+      width: 40,
+      height: 40,
+      borderRadius: 10,
+      backgroundColor: isDark ? '#333' : '#f0f0f0',
+      justifyContent: 'center',
+      alignItems: 'center',
+      marginRight: 12,
+    },
+    settingIconText: {
+      fontSize: 18,
+    },
+    settingInfo: {
+      flex: 1,
+    },
+    settingTitle: {
+      fontSize: 16,
+      fontWeight: '500',
+      color: isDark ? '#fff' : '#000',
+    },
+    settingSubtitle: {
+      fontSize: 13,
+      color: isDark ? '#888' : '#666',
+      marginTop: 2,
+    },
+    chevron: {
+      fontSize: 24,
+      color: isDark ? '#555' : '#ccc',
+      marginLeft: 8,
+    },
+  });

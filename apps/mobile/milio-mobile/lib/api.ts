@@ -1,6 +1,4 @@
-// With USB debugging: run `adb reverse tcp:8000 tcp:8000` then use localhost
-// For WiFi: use your computer's IP address
-const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:8000';
+import { API_URL } from './config';
 
 let cachedUserId: string | null = null;
 
@@ -64,6 +62,10 @@ export async function getChats(): Promise<{ id: string; title: string; created_a
 
 export async function getMessages(chatId: string) {
   const res = await apiFetch(`/chats/${chatId}/messages`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to load messages (${res.status}): ${text}`);
+  }
   return res.json();
 }
 
@@ -75,6 +77,18 @@ export async function sendMessage(chatId: string, content: string, attachmentIds
       attachment_ids: attachmentIds,
     }),
   });
+  if (!res.ok) {
+    // Try to get the error message from the response (backend returns user-friendly messages)
+    let errorMessage = 'Failed to send message';
+    try {
+      const errorData = await res.json();
+      errorMessage = errorData.detail || errorMessage;
+    } catch {
+      const text = await res.text();
+      errorMessage = text || errorMessage;
+    }
+    throw new Error(errorMessage);
+  }
   return res.json();
 }
 
@@ -119,46 +133,3 @@ export async function uploadFile(
   return data;
 }
 
-export async function transcribeAudio(uri: string, platform: string = 'ios'): Promise<{ text: string }> {
-  const userId = await getUserId();
-
-  // Android records as .m4a but needs audio/mp4 MIME type
-  const mimeType = platform === 'android' ? 'audio/mp4' : 'audio/m4a';
-  const filename = platform === 'android' ? 'voice.m4a' : 'voice.m4a';
-
-  console.log(`[API] Transcribing audio: ${uri}`);
-  console.log(`[API] MIME type: ${mimeType}`);
-  console.log(`[API] API_URL: ${API_URL}`);
-
-  const form = new FormData();
-  form.append('audio', {
-    uri,
-    name: filename,
-    type: mimeType,
-  } as any);
-
-  try {
-    console.log(`[API] Sending to ${API_URL}/stt...`);
-    const res = await fetch(`${API_URL}/stt`, {
-      method: 'POST',
-      headers: {
-        'X-User-Id': userId,
-      },
-      body: form,
-    });
-
-    console.log(`[API] STT response status: ${res.status}`);
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`STT failed (${res.status}): ${text}`);
-    }
-
-    const data = await res.json();
-    console.log(`[API] Transcription:`, data.text);
-    return data;
-  } catch (error) {
-    console.error(`[API] STT fetch error:`, error);
-    throw error;
-  }
-}

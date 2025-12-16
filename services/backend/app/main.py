@@ -322,26 +322,41 @@ async def claude_analyze_message(
         "messages": messages
     }
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json=payload,
-        )
-        if r.status_code >= 400:
-            raise HTTPException(500, f"Claude error: {r.status_code} {r.text}")
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload,
+            )
+            if r.status_code >= 400:
+                print(f"[Claude API Error] Status: {r.status_code}, Response: {r.text[:500]}")
+                error_detail = "I'm having trouble connecting to my brain right now. Please try again."
+                if r.status_code == 401:
+                    error_detail = "API authentication failed. Please check your configuration."
+                elif r.status_code == 429:
+                    error_detail = "I'm getting too many requests. Please wait a moment and try again."
+                elif r.status_code >= 500:
+                    error_detail = "The AI service is temporarily unavailable. Please try again later."
+                raise HTTPException(503, error_detail)
 
-        data = r.json()
-        # Extract assistant text
-        out = []
-        for block in data.get("content", []):
-            if block.get("type") == "text":
-                out.append(block.get("text", ""))
-        return "\n".join(out).strip() or "(No response)"
+            data = r.json()
+            # Extract assistant text
+            out = []
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    out.append(block.get("text", ""))
+            return "\n".join(out).strip() or "(No response)"
+    except httpx.TimeoutException:
+        print("[Claude API Error] Request timed out")
+        raise HTTPException(503, "The request took too long. Please try again with a shorter message.")
+    except httpx.RequestError as e:
+        print(f"[Claude API Error] Network error: {e}")
+        raise HTTPException(503, "Network error connecting to AI service. Please check your connection.")
 
 def guess_attachment_type(content_type: str) -> str:
     ct = (content_type or "").lower()
@@ -399,16 +414,18 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
     if not chat:
         raise HTTPException(404, "Chat not found")
 
-    # Load conversation history (last 20 messages for context)
+    # Load conversation history (most recent 20 messages for context)
+    # Get latest 20 in DESC order, then reverse to chronological for AI
     history_rows = sess.execute(
         text("""SELECT role, content FROM messages
                 WHERE chat_id=:c AND user_id=:u
-                ORDER BY created_at ASC
+                ORDER BY created_at DESC
                 LIMIT 20"""),
         {"c": chat_id, "u": x_user_id},
     ).mappings().all()
 
-    conversation_history = [{"role": r["role"], "content": r["content"]} for r in history_rows]
+    # Reverse to chronological order (oldest first for AI context)
+    conversation_history = [{"role": r["role"], "content": r["content"]} for r in reversed(history_rows)]
 
     now = datetime.utcnow()
     mid_user = "m_" + uuid.uuid4().hex

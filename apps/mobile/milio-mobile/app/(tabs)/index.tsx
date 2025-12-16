@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { View, Text, Pressable, StyleSheet, FlatList, ActivityIndicator, useColorScheme, Platform } from 'react-native';
+import { View, Text, Pressable, StyleSheet, FlatList, ActivityIndicator, useColorScheme, Platform, Alert } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
 import { createChat, getChats } from '@/lib/api';
 
@@ -22,6 +22,11 @@ export default function HomeScreen() {
       setChats(data);
     } catch (error) {
       console.error('Failed to load chats:', error);
+      Alert.alert(
+        'Connection Error',
+        'Unable to load chats. Make sure the backend server is running.',
+        [{ text: 'Retry', onPress: () => loadChats() }, { text: 'OK' }]
+      );
     } finally {
       setLoadingChats(false);
     }
@@ -43,6 +48,10 @@ export default function HomeScreen() {
       router.push(`/chat/${chat.id}`);
     } catch (error) {
       console.error('Failed to create chat:', error);
+      Alert.alert(
+        'Error',
+        'Unable to create a new chat. Please check your connection and try again.'
+      );
     } finally {
       setLoading(false);
     }

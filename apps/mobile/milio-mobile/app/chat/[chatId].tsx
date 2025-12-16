@@ -108,10 +108,19 @@ export default function ChatScreen() {
 
   useEffect(() => {
     if (!chatId) return;
-    getMessages(chatId).then((data) => {
-      setMessages(data);
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 100);
-    });
+    getMessages(chatId)
+      .then((data) => {
+        setMessages(data);
+        setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 100);
+      })
+      .catch((error) => {
+        console.error('Failed to load messages:', error);
+        Alert.alert(
+          'Error',
+          'Unable to load messages. Please try again.',
+          [{ text: 'Go Back', onPress: () => router.back() }, { text: 'OK' }]
+        );
+      });
   }, [chatId]);
 
   // Cleanup on unmount
