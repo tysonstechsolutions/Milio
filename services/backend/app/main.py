@@ -4,6 +4,9 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional, List
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import boto3
 import httpx
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
@@ -65,6 +68,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include routers
+from app.routes import stt
+app.include_router(stt.router)
 
 # ---------- DB bootstrap (MVP) ----------
 SCHEMA_SQL = """
@@ -348,13 +355,47 @@ def guess_attachment_type(content_type: str) -> str:
 
 import base64
 
+async def generate_chat_title(user_message: str, assistant_response: str) -> str:
+    """Generate a short 2-4 word title for a chat based on the first exchange."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-3-5-haiku-latest",
+                    "max_tokens": 20,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": f"Generate a 2-4 word title for this conversation. Reply with ONLY the title, no quotes or punctuation.\n\nUser: {user_message[:200]}\nAssistant: {assistant_response[:200]}"
+                        }
+                    ],
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            title = data["content"][0]["text"].strip()
+            # Clean up and limit length
+            title = title.strip('"\'').title()
+            if len(title) > 50:
+                title = title[:47] + "..."
+            return title
+    except Exception as e:
+        print(f"Failed to generate title: {e}")
+        return "New Chat"
+
 @app.post("/chats/{chat_id}/messages", response_model=List[MessageResponse])
 async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
-    # verify chat
+    # verify chat and get current title
     chat = sess.execute(
-        text("SELECT id FROM chats WHERE id=:c AND user_id=:u"),
+        text("SELECT id, title FROM chats WHERE id=:c AND user_id=:u"),
         {"c": chat_id, "u": x_user_id},
-    ).first()
+    ).mappings().first()
     if not chat:
         raise HTTPException(404, "Chat not found")
 
@@ -420,6 +461,15 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
         },
     )
     sess.commit()
+
+    # Auto-generate title for new chats (first message)
+    if len(conversation_history) == 0 and chat["title"] == "New Chat":
+        new_title = await generate_chat_title(req.content, assistant_text)
+        sess.execute(
+            text("UPDATE chats SET title=:t WHERE id=:c"),
+            {"t": new_title, "c": chat_id},
+        )
+        sess.commit()
 
     return [
         {"id": mid_user, "role": "user", "content": req.content, "attachments": req.attachment_ids, "created_at": now},

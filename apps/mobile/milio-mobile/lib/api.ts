@@ -118,3 +118,47 @@ export async function uploadFile(
   console.log(`[API] File uploaded:`, data);
   return data;
 }
+
+export async function transcribeAudio(uri: string, platform: string = 'ios'): Promise<{ text: string }> {
+  const userId = await getUserId();
+
+  // Android records as .m4a but needs audio/mp4 MIME type
+  const mimeType = platform === 'android' ? 'audio/mp4' : 'audio/m4a';
+  const filename = platform === 'android' ? 'voice.m4a' : 'voice.m4a';
+
+  console.log(`[API] Transcribing audio: ${uri}`);
+  console.log(`[API] MIME type: ${mimeType}`);
+  console.log(`[API] API_URL: ${API_URL}`);
+
+  const form = new FormData();
+  form.append('audio', {
+    uri,
+    name: filename,
+    type: mimeType,
+  } as any);
+
+  try {
+    console.log(`[API] Sending to ${API_URL}/stt...`);
+    const res = await fetch(`${API_URL}/stt`, {
+      method: 'POST',
+      headers: {
+        'X-User-Id': userId,
+      },
+      body: form,
+    });
+
+    console.log(`[API] STT response status: ${res.status}`);
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`STT failed (${res.status}): ${text}`);
+    }
+
+    const data = await res.json();
+    console.log(`[API] Transcription:`, data.text);
+    return data;
+  } catch (error) {
+    console.error(`[API] STT fetch error:`, error);
+    throw error;
+  }
+}

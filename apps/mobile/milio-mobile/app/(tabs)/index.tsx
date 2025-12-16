@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from 'react';
-import { View, Text, Pressable, StyleSheet, FlatList, ActivityIndicator, useColorScheme } from 'react-native';
+import { useState, useCallback } from 'react';
+import { View, Text, Pressable, StyleSheet, FlatList, ActivityIndicator, useColorScheme, Platform } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
 import { createChat, getChats } from '@/lib/api';
 
@@ -75,13 +75,6 @@ export default function HomeScreen() {
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>Milio</Text>
-        <Pressable onPress={startChat} style={styles.newButton} disabled={loading}>
-          {loading ? (
-            <ActivityIndicator color="white" size="small" />
-          ) : (
-            <Text style={styles.newButtonText}>+ New</Text>
-          )}
-        </Pressable>
       </View>
 
       {loadingChats ? (
@@ -92,7 +85,7 @@ export default function HomeScreen() {
         <View style={styles.emptyContainer}>
           <Text style={styles.emptyIcon}>💬</Text>
           <Text style={styles.emptyText}>No chats yet</Text>
-          <Text style={styles.emptySubtext}>Tap "+ New" to start a conversation</Text>
+          <Text style={styles.emptySubtext}>Tap the button below to start a conversation</Text>
         </View>
       ) : (
         <FlatList
@@ -118,6 +111,15 @@ export default function HomeScreen() {
           )}
         />
       )}
+
+      {/* Floating New Chat Button */}
+      <Pressable onPress={startChat} style={styles.fab} disabled={loading}>
+        {loading ? (
+          <ActivityIndicator color="white" size="small" />
+        ) : (
+          <Text style={styles.fabText}>+</Text>
+        )}
+      </Pressable>
     </View>
   );
 }
@@ -130,7 +132,7 @@ const createStyles = (isDark: boolean) =>
     },
     header: {
       flexDirection: 'row',
-      justifyContent: 'space-between',
+      justifyContent: 'center',
       alignItems: 'center',
       paddingHorizontal: 20,
       paddingTop: 60,
@@ -143,19 +145,6 @@ const createStyles = (isDark: boolean) =>
       fontSize: 28,
       fontWeight: 'bold',
       color: isDark ? '#fff' : '#000',
-    },
-    newButton: {
-      backgroundColor: '#007AFF',
-      paddingHorizontal: 16,
-      paddingVertical: 8,
-      borderRadius: 20,
-      minWidth: 70,
-      alignItems: 'center',
-    },
-    newButtonText: {
-      color: 'white',
-      fontWeight: '600',
-      fontSize: 15,
     },
     loadingContainer: {
       flex: 1,
@@ -185,6 +174,7 @@ const createStyles = (isDark: boolean) =>
     },
     listContent: {
       padding: 12,
+      paddingBottom: 100, // Space for FAB
     },
     chatItem: {
       flexDirection: 'row',
@@ -223,5 +213,27 @@ const createStyles = (isDark: boolean) =>
       fontSize: 24,
       color: isDark ? '#555' : '#ccc',
       marginLeft: 8,
+    },
+    fab: {
+      position: 'absolute',
+      bottom: Platform.OS === 'ios' ? 100 : 80,
+      right: 20,
+      width: 60,
+      height: 60,
+      borderRadius: 30,
+      backgroundColor: '#007AFF',
+      justifyContent: 'center',
+      alignItems: 'center',
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.25,
+      shadowRadius: 4,
+      elevation: 5,
+    },
+    fabText: {
+      color: 'white',
+      fontSize: 32,
+      fontWeight: '300',
+      marginTop: -2,
     },
   });
