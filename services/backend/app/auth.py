@@ -26,11 +26,19 @@ from sqlalchemy.orm import Session
 
 # ============ Configuration ============
 
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 JWT_SECRET = os.getenv("JWT_SECRET")
+
 if not JWT_SECRET:
-    # Generate a random secret for development - NOT FOR PRODUCTION
-    JWT_SECRET = secrets.token_urlsafe(32)
-    print("[WARNING] JWT_SECRET not set - using random secret. Set JWT_SECRET in production!")
+    if ENVIRONMENT == "production":
+        raise RuntimeError(
+            "CRITICAL: JWT_SECRET environment variable is required in production. "
+            "Generate one with: openssl rand -base64 32"
+        )
+    else:
+        # Development only - generate ephemeral secret
+        JWT_SECRET = secrets.token_urlsafe(32)
+        print("[DEV WARNING] JWT_SECRET not set - using ephemeral secret. Tokens will invalidate on restart.")
 
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "30"))

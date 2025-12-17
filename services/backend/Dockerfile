@@ -19,8 +19,12 @@ RUN pip install --no-cache-dir .
 # Copy application code
 COPY app/ ./app/
 
+# Copy Alembic files for migrations
+COPY alembic.ini ./
+COPY alembic/ ./alembic/
+
 # Expose port (Railway sets PORT env var)
 EXPOSE 8000
 
-# Run the server
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Run migrations and start the server
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

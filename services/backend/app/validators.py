@@ -16,12 +16,12 @@ from pydantic import BaseModel, Field, validator
 
 # ============ Constants ============
 
-MAX_MESSAGE_LENGTH = 10000
+MAX_MESSAGE_LENGTH = 32_000  # ~8k tokens worth of text
 MAX_CHAT_TITLE_LENGTH = 200
 MAX_APP_NAME_LENGTH = 100
-MAX_APP_PROMPT_LENGTH = 5000
+MAX_PROMPT_LENGTH = 16_000   # AI generation prompts
 MAX_ATTACHMENT_IDS = 10
-MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50MB
+MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 50MB
 
 ALLOWED_FILE_TYPES = {
     # Images
@@ -41,6 +41,7 @@ ALLOWED_FILE_TYPES = {
     "audio/mpeg",
     "audio/wav",
     "audio/webm",
+    "audio/ogg",
 }
 
 # URL patterns
@@ -182,7 +183,7 @@ class AppGenerateRequestValidated(BaseModel):
     prompt: str = Field(
         ...,
         min_length=10,
-        max_length=MAX_APP_PROMPT_LENGTH,
+        max_length=MAX_PROMPT_LENGTH,
         description="App generation prompt"
     )
 
@@ -309,3 +310,26 @@ def sanitize_html(value: str) -> str:
 def sanitize_for_sql_like(value: str) -> str:
     """Escape special characters for SQL LIKE queries."""
     return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+
+# ============ ID Validation ============
+
+def validate_chat_id(chat_id: str) -> str:
+    """Validate and return chat ID."""
+    if not CHAT_ID_PATTERN.match(chat_id):
+        raise ValueError('Invalid chat ID format')
+    return chat_id
+
+
+def validate_file_id(file_id: str) -> str:
+    """Validate and return file ID."""
+    if not FILE_ID_PATTERN.match(file_id):
+        raise ValueError('Invalid file ID format')
+    return file_id
+
+
+def validate_app_id(app_id: str) -> str:
+    """Validate and return app ID."""
+    if not APP_ID_PATTERN.match(app_id):
+        raise ValueError('Invalid app ID format')
+    return app_id

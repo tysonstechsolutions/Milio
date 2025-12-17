@@ -9,7 +9,7 @@ load_dotenv()
 
 import boto3
 import httpx
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, status
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
@@ -26,6 +26,15 @@ from app.auth import (
 )
 from app.validators import validate_file_upload, ALLOWED_FILE_TYPES, MAX_FILE_SIZE_BYTES
 from app.rate_limiter import setup_rate_limiting, limiter
+from app.pagination import (
+    PaginationParams,
+    CursorPaginationParams,
+    PaginatedResponse,
+    CursorPaginatedResponse,
+    create_datetime_cursor,
+    parse_datetime_cursor,
+)
+
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 S3_ENDPOINT = os.environ["S3_ENDPOINT"]
@@ -50,7 +59,7 @@ Your goals:
 You can analyze images, documents, and code.
 """
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "dev_secret_change_me")
+# JWT_SECRET is now managed in auth.py
 GAS_API_KEY = os.environ.get("GAS_API_KEY", "")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -76,16 +85,63 @@ app = FastAPI(title="Milio Backend")
 # Setup rate limiting
 setup_rate_limiting(app)
 
-# CORS Configuration - more restrictive in production
-ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8081").split(",")
+# ============ CORS Configuration ============
+
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+
+def get_allowed_origins() -> list[str]:
+    """Get allowed CORS origins based on environment."""
+    env_origins = os.environ.get("ALLOWED_ORIGINS", "")
+    
+    if ENVIRONMENT == "production":
+        if not env_origins:
+            raise RuntimeError(
+                "ALLOWED_ORIGINS environment variable is required in production. "
+                "Set it to your frontend domains (comma-separated)."
+            )
+        origins = [o.strip() for o in env_origins.split(",") if o.strip()]
+        if not origins:
+            raise RuntimeError("ALLOWED_ORIGINS cannot be empty in production.")
+        return origins
+    else:
+        # Development defaults
+        default_origins = [
+            "http://localhost:3000",
+            "http://localhost:8081",
+            "http://localhost:8000",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:8081",
+            "http://127.0.0.1:8000",
+            "exp://localhost:8081",  # Expo development
+        ]
+        if env_origins:
+            custom_origins = [o.strip() for o in env_origins.split(",") if o.strip()]
+            return list(set(default_origins + custom_origins))
+        return default_origins
+
+ALLOWED_ORIGINS = get_allowed_origins()
+
+# Log allowed origins on startup
+print(f"[CORS] Environment: {ENVIRONMENT}")
+print(f"[CORS] Allowed origins: {ALLOWED_ORIGINS}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Request-ID",
+        "Accept",
+        "Origin",
+    ],
+    expose_headers=[
+        "X-Request-ID",
+        "Retry-After",
+    ],
+    max_age=600,  # Cache preflight for 10 minutes
 )
 
 # Include routers
@@ -334,13 +390,11 @@ class AppGenerateRequest(BaseModel):
     app_id: str
     prompt: str
 
-# ---------- Dev auth (MVP) ----------
-from fastapi import Header
+# ============ Authentication ============
+# All authentication is now handled via JWT tokens in auth.py
+# The get_user_id alias is provided for backwards compatibility during migration
 
-def get_user_id(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
-    if not x_user_id:
-        raise HTTPException(status_code=401, detail="Missing X-User-Id header")
-    return x_user_id
+get_user_id = get_user_id_from_token
 
 
 @app.get("/health")
@@ -427,21 +481,21 @@ async def get_me(current_user: dict = Depends(get_current_user), sess=Depends(db
 
 # ---------- Chats ----------
 @app.post("/chats", response_model=ChatResponse)
-def create_chat(req: ChatCreateRequest, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+def create_chat(req: ChatCreateRequest, sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     chat_id = "c_" + uuid.uuid4().hex
     now = datetime.utcnow()
     sess.execute(
         text("INSERT INTO chats (id, user_id, title, created_at) VALUES (:id, :user_id, :title, :created_at)"),
-        {"id": chat_id, "user_id": x_user_id, "title": req.title, "created_at": now},
+        {"id": chat_id, "user_id": user_id, "title": req.title, "created_at": now},
     )
     sess.commit()
     return {"id": chat_id, "title": req.title, "created_at": now}
 
 @app.get("/chats", response_model=List[ChatResponse])
-def list_chats(sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+def list_chats(sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     rows = sess.execute(
         text("SELECT id, title, created_at FROM chats WHERE user_id=:u ORDER BY created_at DESC"),
-        {"u": x_user_id},
+        {"u": user_id},
     ).mappings().all()
     return [dict(r) for r in rows]
 
@@ -451,7 +505,7 @@ async def upload_file(
     chat_id: Optional[str] = Form(default=None),
     file: UploadFile = File(...),
     sess=Depends(db),
-    x_user_id: str = Depends(get_user_id),
+    user_id: str = Depends(get_user_id_from_token),
 ):
     fid = "f_" + uuid.uuid4().hex
     now = datetime.utcnow()
@@ -461,7 +515,7 @@ async def upload_file(
     if size_bytes == 0:
         raise HTTPException(400, "Empty upload")
 
-    s3_key = f"{x_user_id}/{fid}/{file.filename}"
+    s3_key = f"{user_id}/{fid}/{file.filename}"
     s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=content, ContentType=file.content_type or "application/octet-stream")
 
     sess.execute(
@@ -469,7 +523,7 @@ async def upload_file(
                 VALUES (:id, :user_id, :chat_id, :filename, :content_type, :size_bytes, :s3_key, :created_at)"""),
         {
             "id": fid,
-            "user_id": x_user_id,
+            "user_id": user_id,
             "chat_id": chat_id,
             "filename": file.filename,
             "content_type": file.content_type or "application/octet-stream",
@@ -483,7 +537,7 @@ async def upload_file(
     return {"id": fid, "filename": file.filename, "content_type": file.content_type, "size_bytes": size_bytes}
 
 @app.get("/files/{file_id}")
-def download_file(file_id: str, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+def download_file(file_id: str, sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     row = sess.execute(
         text("SELECT s3_key, content_type, filename FROM files WHERE id=:id AND user_id=:u"),
         {"id": file_id, "u": x_user_id},
@@ -633,7 +687,7 @@ async def generate_chat_title(user_message: str, assistant_response: str) -> str
         return "New Chat"
 
 @app.post("/chats/{chat_id}/messages", response_model=List[MessageResponse])
-async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     # verify chat and get current title
     chat = sess.execute(
         text("SELECT id, title FROM chats WHERE id=:c AND user_id=:u"),
@@ -663,7 +717,7 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
         {
             "id": mid_user,
             "chat_id": chat_id,
-            "user_id": x_user_id,
+            "user_id": user_id,
             "role": "user",
             "content": req.content,
             "att": json.dumps(req.attachment_ids),
@@ -715,7 +769,7 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
                     {
                         "id": mid_assistant,
                         "chat_id": chat_id,
-                        "user_id": x_user_id,
+                        "user_id": user_id,
                         "role": "assistant",
                         "content": recommendation,
                         "att": json.dumps([]),
@@ -765,7 +819,7 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
                 {
                     "id": mid_assistant,
                     "chat_id": chat_id,
-                    "user_id": x_user_id,
+                    "user_id": user_id,
                     "role": "assistant",
                     "content": clarification,
                     "att": json.dumps([]),
@@ -792,7 +846,7 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
             {
                 "id": mid_assistant,
                 "chat_id": chat_id,
-                "user_id": x_user_id,
+                "user_id": user_id,
                 "role": "assistant",
                 "content": gas_response,
                 "att": json.dumps([]),
@@ -820,7 +874,7 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
     if req.attachment_ids:
         # Use IN clause with dynamic placeholders for compatibility
         placeholders = ",".join([f":id{i}" for i in range(len(req.attachment_ids))])
-        params = {"u": x_user_id}
+        params = {"u": user_id}
         params.update({f"id{i}": aid for i, aid in enumerate(req.attachment_ids)})
         rows = sess.execute(
             text(f"SELECT id, filename, content_type, s3_key FROM files WHERE user_id=:u AND id IN ({placeholders})"),
@@ -846,7 +900,7 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
         {
             "id": mid_assistant,
             "chat_id": chat_id,
-            "user_id": x_user_id,
+            "user_id": user_id,
             "role": "assistant",
             "content": assistant_text,
             "att": json.dumps([]),
@@ -870,7 +924,7 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
     ]
 
 @app.get("/chats/{chat_id}/messages", response_model=List[MessageResponse])
-def list_messages(chat_id: str, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+def list_messages(chat_id: str, sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     rows = sess.execute(
         text("""SELECT id, role, content, attachments_json, created_at
                 FROM messages WHERE chat_id=:c AND user_id=:u ORDER BY created_at ASC"""),
@@ -890,7 +944,7 @@ def list_messages(chat_id: str, sess=Depends(db), x_user_id: str = Depends(get_u
 
 # ---------- Streaming Messages ----------
 @app.post("/chats/{chat_id}/stream")
-async def stream_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+async def stream_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     """Stream the assistant's response token-by-token using Server-Sent Events."""
     # (1) Verify chat exists
     chat = sess.execute(
@@ -919,7 +973,7 @@ async def stream_message(chat_id: str, req: MessageCreateRequest, sess=Depends(d
         {
             "id": mid_user,
             "chat": chat_id,
-            "user": x_user_id,
+            "user": user_id,
             "role": "user",
             "content": req.content,
             "att": json.dumps(req.attachment_ids),
@@ -933,7 +987,7 @@ async def stream_message(chat_id: str, req: MessageCreateRequest, sess=Depends(d
     if req.attachment_ids:
         # Use IN clause with tuple for SQLite/PostgreSQL compatibility
         placeholders = ",".join([f":id{i}" for i in range(len(req.attachment_ids))])
-        params = {"u": x_user_id}
+        params = {"u": user_id}
         params.update({f"id{i}": aid for i, aid in enumerate(req.attachment_ids)})
         rows = sess.execute(
             text(f"SELECT id, filename, content_type, s3_key FROM files WHERE user_id=:u AND id IN ({placeholders})"),
@@ -1115,7 +1169,7 @@ async def stream_message(chat_id: str, req: MessageCreateRequest, sess=Depends(d
 
 # ---------- App Library ----------
 @app.post("/apps", response_model=AppResponse)
-def create_app(req: AppCreateRequest, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+def create_app(req: AppCreateRequest, sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     aid = "a_" + uuid.uuid4().hex
     now = datetime.utcnow()
     sess.execute(
@@ -1126,15 +1180,15 @@ def create_app(req: AppCreateRequest, sess=Depends(db), x_user_id: str = Depends
     return {"id": aid, "name": req.name, "icon_emoji": req.icon_emoji, "launch_url": req.launch_url, "created_at": now}
 
 @app.get("/apps", response_model=List[AppResponse])
-def list_apps(sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+def list_apps(sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     rows = sess.execute(
         text("SELECT id, name, icon_emoji, launch_url, created_at FROM apps WHERE user_id=:u ORDER BY created_at DESC"),
-        {"u": x_user_id},
+        {"u": user_id},
     ).mappings().all()
     return [dict(r) for r in rows]
 
 @app.get("/apps/{app_id}/versions")
-def list_app_versions(app_id: str, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+def list_app_versions(app_id: str, sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     """List all versions of an app."""
     # Verify app ownership
     app_row = sess.execute(
@@ -1289,7 +1343,7 @@ async def claude_generate_app_js(prompt: str) -> str:
         return js
 
 @app.post("/apps/generate")
-async def generate_app(req: AppGenerateRequest, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+async def generate_app(req: AppGenerateRequest, sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     # Verify app ownership
     row = sess.execute(
         text("SELECT id FROM apps WHERE id=:a AND user_id=:u"),
@@ -1303,7 +1357,7 @@ async def generate_app(req: AppGenerateRequest, sess=Depends(db), x_user_id: str
 
     vid = "v_" + uuid.uuid4().hex
     now = datetime.utcnow()
-    s3_key = f"{x_user_id}/apps/{req.app_id}/{vid}/index.html"
+    s3_key = f"{user_id}/apps/{req.app_id}/{vid}/index.html"
     s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=html.encode("utf-8"), ContentType="text/html")
 
     sess.execute(
@@ -1316,7 +1370,7 @@ async def generate_app(req: AppGenerateRequest, sess=Depends(db), x_user_id: str
     return {"version_id": vid, "run_url": f"/apps/{req.app_id}/versions/{vid}/index.html"}
 
 @app.get("/apps/{app_id}/versions/{version_id}/index.html")
-def serve_app_html(app_id: str, version_id: str, sess=Depends(db), x_user_id: str = Depends(get_user_id)):
+def serve_app_html(app_id: str, version_id: str, sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     row = sess.execute(
         text("""SELECT s3_key FROM app_versions
                 WHERE id=:v AND app_id=:a AND user_id=:u"""),
