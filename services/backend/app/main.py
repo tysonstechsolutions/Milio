@@ -1137,20 +1137,40 @@ __APP_JS__
 </html>
 """
 
+def clean_generated_js(js_code: str) -> str:
+    """Clean up generated JavaScript code by removing markdown blocks and common issues."""
+    import re
+
+    code = js_code.strip()
+
+    # Remove markdown code blocks (```javascript, ```js, ```)
+    code = re.sub(r'^```(?:javascript|js)?\s*\n?', '', code, flags=re.MULTILINE)
+    code = re.sub(r'\n?```\s*$', '', code, flags=re.MULTILINE)
+    code = re.sub(r'```', '', code)
+
+    # Remove any HTML comments that might cause issues
+    code = re.sub(r'<!--.*?-->', '', code, flags=re.DOTALL)
+
+    return code.strip()
+
+
 async def claude_generate_app_js(prompt: str) -> str:
     if not ANTHROPIC_API_KEY:
         return "document.getElementById('app').innerText='Claude key not configured.';"
 
     system = (
         "You are generating a SINGLE-FILE web app that runs inside an existing HTML shell.\n"
-        "Return ONLY JavaScript (no markdown) that mounts UI into #app.\n"
-        "No external network calls. No external libraries. Use plain DOM.\n"
+        "CRITICAL: Return ONLY raw JavaScript code. NO markdown, NO code blocks, NO backticks.\n"
+        "The code will be inserted directly into a <script> tag.\n"
+        "Use document.getElementById('app') to mount your UI.\n"
+        "No external network calls. No external libraries. Use plain DOM manipulation.\n"
         "Make it feel like a real app: header, navigation, basic state, and polished layout.\n"
+        "Use template literals with backticks for HTML strings.\n"
     )
 
     payload = {
         "model": ANTHROPIC_MODEL,
-        "max_tokens": 1200,
+        "max_tokens": 2000,
         "system": system,
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -1172,6 +1192,10 @@ async def claude_generate_app_js(prompt: str) -> str:
             if block.get("type") == "text":
                 out.append(block.get("text", ""))
         js = "\n".join(out).strip()
+
+        # Clean up the generated code
+        js = clean_generated_js(js)
+
         return js
 
 @app.post("/apps/generate")

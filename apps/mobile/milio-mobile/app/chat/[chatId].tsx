@@ -295,9 +295,11 @@ export default function ChatScreen() {
             }
           } else {
             // Append chunk to the assistant message content
+            // Unescape newlines that come escaped from SSE
+            const unescapedData = event.data.replace(/\\n/g, '\n');
             setMessages((prev) =>
               prev.map((m) =>
-                m.id === tempAssistantId ? { ...m, content: m.content + event.data } : m
+                m.id === tempAssistantId ? { ...m, content: m.content + unescapedData } : m
               )
             );
           }
@@ -364,8 +366,8 @@ export default function ChatScreen() {
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={90}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
       {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
@@ -645,10 +647,12 @@ const createStyles = (isDark: boolean) =>
       backgroundColor: isDark ? '#2c2c2e' : '#f2f2f2',
       borderRadius: 20,
       paddingHorizontal: 16,
-      paddingVertical: 10,
+      paddingVertical: 12,
       fontSize: 16,
-      maxHeight: 100,
+      minHeight: 44,
+      maxHeight: 120,
       color: isDark ? '#fff' : '#000',
+      textAlignVertical: 'center',
     },
     micBtn: {
       marginLeft: 8,
