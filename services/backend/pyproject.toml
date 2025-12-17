@@ -15,4 +15,9 @@ dependencies = [
   "python-dotenv==1.0.1",
   "cryptography==44.0.0",
   "openai-whisper",
+  # Auth dependencies
+  "python-jose[cryptography]==3.3.0",
+  "passlib[bcrypt]==1.7.4",
+  # Rate limiting
+  "slowapi==0.1.9",
 ]

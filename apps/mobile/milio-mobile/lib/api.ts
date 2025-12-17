@@ -1,202 +1,481 @@
-import { API_URL } from './config';
+/**
+ * API Client for Milio Mobile App
+ * 
+ * Updated with:
+ * - JWT authentication
+ * - Token refresh
+ * - Rate limit handling
+ * - Better error handling
+ * 
+ * Usage:
+ *   1. Replace apps/mobile/milio-mobile/lib/api.ts with this file
+ *   2. npm install @react-native-async-storage/async-storage
+ */
 
-let cachedUserId: string | null = null;
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { 
+  ApiError, NetworkError, AuthError, RateLimitError,
+  parseApiError, logError 
+} from './errors';
 
-export async function getUserId(): Promise<string> {
-  if (cachedUserId) return cachedUserId;
+// ============ Configuration ============
 
-  console.log(`[API] Authenticating at ${API_URL}/auth/anon`);
+const API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:8000';
 
-  const res = await fetch(`${API_URL}/auth/anon`, {
-    method: 'POST',
-  });
+const TOKEN_KEY = '@milio/access_token';
+const REFRESH_TOKEN_KEY = '@milio/refresh_token';
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Auth failed (${res.status}): ${text}`);
+// ============ Token Storage ============
+
+export async function getAccessToken(): Promise<string | null> {
+  try {
+    return await AsyncStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export async function getRefreshToken(): Promise<string | null> {
+  try {
+    return await AsyncStorage.getItem(REFRESH_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export async function setTokens(accessToken: string, refreshToken: string): Promise<void> {
+  await AsyncStorage.multiSet([
+    [TOKEN_KEY, accessToken],
+    [REFRESH_TOKEN_KEY, refreshToken],
+  ]);
+}
+
+export async function clearTokens(): Promise<void> {
+  await AsyncStorage.multiRemove([TOKEN_KEY, REFRESH_TOKEN_KEY]);
+}
+
+// ============ Auth State ============
+
+let isRefreshing = false;
+let refreshPromise: Promise<boolean> | null = null;
+
+export async function isAuthenticated(): Promise<boolean> {
+  const token = await getAccessToken();
+  return !!token;
+}
+
+// ============ Token Refresh ============
+
+async function tryRefreshToken(): Promise<boolean> {
+  // Prevent multiple simultaneous refresh attempts
+  if (isRefreshing && refreshPromise) {
+    return refreshPromise;
   }
 
-  const data = await res.json();
-  cachedUserId = data.user_id;
-
-  console.log(`[API] Got user ID: ${cachedUserId}`);
-  return cachedUserId;
+  isRefreshing = true;
+  refreshPromise = doRefreshToken();
+  
+  try {
+    return await refreshPromise;
+  } finally {
+    isRefreshing = false;
+    refreshPromise = null;
+  }
 }
 
-async function apiFetch(path: string, options: RequestInit = {}) {
-  const userId = await getUserId();
+async function doRefreshToken(): Promise<boolean> {
+  const refreshToken = await getRefreshToken();
+  if (!refreshToken) {
+    return false;
+  }
 
-  return fetch(`${API_URL}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-User-Id': userId,
-      ...(options.headers || {}),
-    },
+  try {
+    const response = await fetch(`${API_URL}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      await setTokens(data.access_token, data.refresh_token);
+      return true;
+    }
+  } catch (error) {
+    logError(error instanceof Error ? error : new Error(String(error)), {
+      action: 'token_refresh',
+    });
+  }
+
+  // Refresh failed - clear tokens
+  await clearTokens();
+  return false;
+}
+
+// ============ Core Fetch Function ============
+
+interface FetchOptions extends RequestInit {
+  skipAuth?: boolean;
+}
+
+async function apiFetch(path: string, options: FetchOptions = {}): Promise<Response> {
+  const { skipAuth = false, ...fetchOptions } = options;
+  
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(fetchOptions.headers as Record<string, string>),
+  };
+
+  // Add auth header unless skipped
+  if (!skipAuth) {
+    const token = await getAccessToken();
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+  }
+
+  let response: Response;
+
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      ...fetchOptions,
+      headers,
+    });
+  } catch (error) {
+    // Network error
+    logError(error instanceof Error ? error : new Error(String(error)), { path });
+    throw new NetworkError();
+  }
+
+  // Handle rate limiting
+  if (response.status === 429) {
+    const retryAfter = parseInt(response.headers.get('Retry-After') || '60', 10);
+    throw new RateLimitError(retryAfter);
+  }
+
+  // Handle auth errors
+  if (response.status === 401 && !skipAuth) {
+    const refreshed = await tryRefreshToken();
+    if (refreshed) {
+      // Retry with new token
+      const newToken = await getAccessToken();
+      if (newToken) {
+        headers['Authorization'] = `Bearer ${newToken}`;
+        return fetch(`${API_URL}${path}`, { ...fetchOptions, headers });
+      }
+    }
+    throw new AuthError();
+  }
+
+  return response;
+}
+
+// ============ Auth API ============
+
+export interface AuthResponse {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number;
+}
+
+export interface User {
+  id: string;
+  email: string;
+  display_name: string | null;
+  created_at: string;
+}
+
+export async function register(
+  email: string,
+  password: string,
+  displayName?: string
+): Promise<AuthResponse> {
+  const response = await apiFetch('/auth/register', {
+    method: 'POST',
+    skipAuth: true,
+    body: JSON.stringify({
+      email,
+      password,
+      display_name: displayName,
+    }),
   });
+
+  if (!response.ok) {
+    throw await parseApiError(response);
+  }
+
+  const data: AuthResponse = await response.json();
+  await setTokens(data.access_token, data.refresh_token);
+  return data;
 }
 
-export async function createChat(title: string) {
-  console.log(`[API] Creating chat: ${title}`);
-  const res = await apiFetch('/chats', {
+export async function login(email: string, password: string): Promise<AuthResponse> {
+  const response = await apiFetch('/auth/login', {
+    method: 'POST',
+    skipAuth: true,
+    body: JSON.stringify({ email, password }),
+  });
+
+  if (!response.ok) {
+    throw await parseApiError(response);
+  }
+
+  const data: AuthResponse = await response.json();
+  await setTokens(data.access_token, data.refresh_token);
+  return data;
+}
+
+export async function logout(): Promise<void> {
+  await clearTokens();
+}
+
+export async function getCurrentUser(): Promise<User> {
+  const response = await apiFetch('/auth/me');
+  
+  if (!response.ok) {
+    throw await parseApiError(response);
+  }
+
+  return response.json();
+}
+
+// ============ Chat API ============
+
+export interface Chat {
+  id: string;
+  title: string | null;
+  created_at: string;
+}
+
+export interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  attachments: string[];
+  created_at: string;
+}
+
+export async function getChats(): Promise<Chat[]> {
+  const response = await apiFetch('/chats');
+  
+  if (!response.ok) {
+    throw await parseApiError(response);
+  }
+
+  return response.json();
+}
+
+export async function createChat(title?: string): Promise<Chat> {
+  const response = await apiFetch('/chats', {
     method: 'POST',
     body: JSON.stringify({ title }),
   });
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Create chat failed (${res.status}): ${text}`);
+  if (!response.ok) {
+    throw await parseApiError(response);
   }
 
-  const data = await res.json();
-  console.log(`[API] Chat created:`, data);
-  return data;
+  return response.json();
 }
 
-export async function getChats(): Promise<{ id: string; title: string; created_at: string }[]> {
-  const res = await apiFetch('/chats');
-  if (!res.ok) {
-    throw new Error('Failed to load chats');
+export async function getMessages(chatId: string): Promise<Message[]> {
+  const response = await apiFetch(`/chats/${chatId}/messages`);
+
+  if (!response.ok) {
+    throw await parseApiError(response);
   }
-  return res.json();
+
+  return response.json();
 }
 
-export async function getMessages(chatId: string) {
-  const res = await apiFetch(`/chats/${chatId}/messages`);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to load messages (${res.status}): ${text}`);
-  }
-  return res.json();
-}
-
-export async function sendMessage(chatId: string, content: string, attachmentIds: string[] = []) {
-  const res = await apiFetch(`/chats/${chatId}/messages`, {
+export async function sendMessage(
+  chatId: string,
+  content: string,
+  attachmentIds: string[] = []
+): Promise<Message> {
+  const response = await apiFetch(`/chats/${chatId}/messages`, {
     method: 'POST',
     body: JSON.stringify({
       content,
       attachment_ids: attachmentIds,
     }),
   });
-  if (!res.ok) {
-    // Try to get the error message from the response (backend returns user-friendly messages)
-    let errorMessage = 'Failed to send message';
-    try {
-      const errorData = await res.json();
-      errorMessage = errorData.detail || errorMessage;
-    } catch {
-      const text = await res.text();
-      errorMessage = text || errorMessage;
-    }
-    throw new Error(errorMessage);
+
+  if (!response.ok) {
+    throw await parseApiError(response);
   }
-  return res.json();
+
+  return response.json();
+}
+
+// ============ Streaming API ============
+
+export interface StreamCallbacks {
+  onToken?: (token: string) => void;
+  onComplete?: (fullText: string) => void;
+  onError?: (error: Error) => void;
+}
+
+export async function streamMessage(
+  chatId: string,
+  content: string,
+  attachmentIds: string[] = [],
+  callbacks: StreamCallbacks = {}
+): Promise<void> {
+  const token = await getAccessToken();
+  
+  const response = await fetch(`${API_URL}/chats/${chatId}/stream`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({
+      content,
+      attachment_ids: attachmentIds,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await parseApiError(response);
+    callbacks.onError?.(error);
+    throw error;
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error('No response body');
+  }
+
+  const decoder = new TextDecoder();
+  let fullText = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n');
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.token) {
+              fullText += data.token;
+              callbacks.onToken?.(data.token);
+            }
+            if (data.done) {
+              callbacks.onComplete?.(fullText);
+            }
+          } catch {
+            // Ignore parse errors for incomplete chunks
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+// ============ File API ============
+
+export interface FileUpload {
+  id: string;
+  filename: string;
+  url: string;
+  content_type: string;
 }
 
 export async function uploadFile(
   uri: string,
   filename: string,
-  mimeType: string,
-  chatId?: string
-): Promise<{ id: string; filename: string }> {
-  const userId = await getUserId();
-
-  const form = new FormData();
-  if (chatId) {
-    form.append('chat_id', chatId);
-  }
-
-  // React Native FormData format
-  form.append('file', {
+  mimeType: string
+): Promise<FileUpload> {
+  const token = await getAccessToken();
+  
+  const formData = new FormData();
+  formData.append('file', {
     uri,
     name: filename,
     type: mimeType,
   } as any);
 
-  console.log(`[API] Uploading file: ${filename}`);
-
-  const res = await fetch(`${API_URL}/files/upload`, {
+  const response = await fetch(`${API_URL}/files/upload`, {
     method: 'POST',
     headers: {
-      'X-User-Id': userId,
-      // Don't set Content-Type - fetch sets boundary for multipart
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: form,
+    body: formData,
   });
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Upload failed (${res.status}): ${text}`);
+  if (!response.ok) {
+    throw await parseApiError(response);
   }
 
-  const data = await res.json();
-  console.log(`[API] File uploaded:`, data);
-  return data;
+  return response.json();
 }
 
-// ---------- Apps API ----------
-export type AppItem = {
+// ============ App API ============
+
+export interface App {
   id: string;
   name: string;
   icon_emoji: string;
-  launch_url?: string;
+  launch_url: string | null;
   created_at: string;
-};
+}
 
-export type AppVersion = {
-  id: string;
-  prompt: string;
-  created_at: string;
-};
+export async function getApps(): Promise<App[]> {
+  const response = await apiFetch('/apps');
 
-export async function getApps(): Promise<AppItem[]> {
-  const res = await apiFetch('/apps');
-  if (!res.ok) {
-    throw new Error('Failed to load apps');
+  if (!response.ok) {
+    throw await parseApiError(response);
   }
-  return res.json();
+
+  return response.json();
 }
 
 export async function createApp(
   name: string,
-  launchUrl?: string,
-  iconEmoji?: string
-): Promise<AppItem> {
-  const res = await apiFetch('/apps', {
+  iconEmoji?: string,
+  launchUrl?: string
+): Promise<App> {
+  const response = await apiFetch('/apps', {
     method: 'POST',
     body: JSON.stringify({
       name,
-      icon_emoji: iconEmoji || '🧩',
-      launch_url: launchUrl || null,
+      icon_emoji: iconEmoji,
+      launch_url: launchUrl,
     }),
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Create app failed (${res.status}): ${text}`);
+
+  if (!response.ok) {
+    throw await parseApiError(response);
   }
-  return res.json();
+
+  return response.json();
 }
 
-export async function generateApp(
-  appId: string,
-  prompt: string
-): Promise<{ version_id: string; run_url: string }> {
-  const res = await apiFetch('/apps/generate', {
+export async function generateApp(appId: string, prompt: string): Promise<{ url: string }> {
+  const response = await apiFetch('/apps/generate', {
     method: 'POST',
-    body: JSON.stringify({ app_id: appId, prompt }),
+    body: JSON.stringify({
+      app_id: appId,
+      prompt,
+    }),
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`App generation failed (${res.status}): ${text}`);
+
+  if (!response.ok) {
+    throw await parseApiError(response);
   }
-  return res.json();
+
+  return response.json();
 }
 
-export async function getAppVersions(appId: string): Promise<AppVersion[]> {
-  const res = await apiFetch(`/apps/${appId}/versions`);
-  if (!res.ok) {
-    throw new Error('Failed to load app versions');
-  }
-  return res.json();
-}
+// ============ Exports ============
 
+export { API_URL };

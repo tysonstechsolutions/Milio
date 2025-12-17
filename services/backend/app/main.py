@@ -9,12 +9,23 @@ load_dotenv()
 
 import boto3
 import httpx
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+
+# Auth imports
+from app.auth import (
+    UserCreate, UserLogin, TokenResponse, TokenRefreshRequest, UserResponse,
+    get_current_user, get_user_id_from_token,
+    create_access_token, create_refresh_token, decode_token,
+    verify_password, get_user_by_email, get_user_by_id, create_user_in_db,
+    ACCESS_TOKEN_EXPIRE_MINUTES
+)
+from app.validators import validate_file_upload, ALLOWED_FILE_TYPES, MAX_FILE_SIZE_BYTES
+from app.rate_limiter import setup_rate_limiting, limiter
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 S3_ENDPOINT = os.environ["S3_ENDPOINT"]
@@ -61,6 +72,13 @@ s3 = boto3.client(
 )
 
 app = FastAPI(title="Milio Backend")
+
+# Setup rate limiting
+setup_rate_limiting(app)
+
+# CORS Configuration - more restrictive in production
+ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8081").split(",")
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
 
 app.add_middleware(
     CORSMiddleware,
@@ -212,8 +230,13 @@ def parse_orders_from_text(text: str) -> tuple[list[dict], float]:
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
+  email TEXT UNIQUE,
+  password_hash TEXT,
+  display_name TEXT,
   created_at TIMESTAMP NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
 CREATE TABLE IF NOT EXISTS chats (
   id TEXT PRIMARY KEY,
@@ -334,6 +357,73 @@ def auth_anon(sess=Depends(db)):
     )
     sess.commit()
     return {"user_id": user_id}
+
+
+# ---------- JWT Authentication Routes ----------
+@app.post("/auth/register", response_model=TokenResponse)
+@limiter.limit("3/minute")
+async def register(request: Request, req: UserCreate, sess=Depends(db)):
+    """Register a new user with email and password."""
+    existing = get_user_by_email(sess, req.email)
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    user = create_user_in_db(sess, req.email, req.password, req.display_name)
+    access_token = create_access_token(user["id"], user["email"])
+    refresh_token = create_refresh_token(user["id"])
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    }
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+@limiter.limit("5/minute")
+async def login(request: Request, req: UserLogin, sess=Depends(db)):
+    """Login with email and password."""
+    user = get_user_by_email(sess, req.email)
+    if not user or not verify_password(req.password, user["password_hash"]):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+    access_token = create_access_token(user["id"], user["email"])
+    refresh_token = create_refresh_token(user["id"])
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    }
+
+
+@app.post("/auth/refresh", response_model=TokenResponse)
+@limiter.limit("10/minute")
+async def refresh_tokens(request: Request, req: TokenRefreshRequest, sess=Depends(db)):
+    """Refresh access token using refresh token."""
+    payload = decode_token(req.refresh_token)
+    if payload.get("type") != "refresh":
+        raise HTTPException(status_code=400, detail="Invalid token type")
+    user_id = payload["sub"]
+    user = get_user_by_id(sess, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    access_token = create_access_token(user["id"], user["email"])
+    new_refresh_token = create_refresh_token(user["id"])
+    return {
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer",
+        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    }
+
+
+@app.get("/auth/me", response_model=UserResponse)
+async def get_me(current_user: dict = Depends(get_current_user), sess=Depends(db)):
+    """Get current user info."""
+    user = get_user_by_id(sess, current_user["user_id"])
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
 
 # ---------- Chats ----------
 @app.post("/chats", response_model=ChatResponse)
