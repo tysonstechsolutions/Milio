@@ -422,6 +422,14 @@ async def register(request: Request, req: UserCreate, sess=Depends(db)):
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     user = create_user_in_db(sess, req.email, req.password, req.display_name)
+
+    # Provision default apps for the new user
+    try:
+        provision_default_apps(sess, user["id"])
+    except Exception as e:
+        print(f"Warning: Failed to provision default apps: {e}")
+        # Don't fail registration if default apps fail
+
     access_token = create_access_token(user["id"], user["email"])
     refresh_token = create_refresh_token(user["id"])
     return {
@@ -540,7 +548,7 @@ async def upload_file(
 def download_file(file_id: str, sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     row = sess.execute(
         text("SELECT s3_key, content_type, filename FROM files WHERE id=:id AND user_id=:u"),
-        {"id": file_id, "u": x_user_id},
+        {"id": file_id, "u": user_id},
     ).mappings().first()
     if not row:
         raise HTTPException(404, "File not found")
@@ -691,7 +699,7 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
     # verify chat and get current title
     chat = sess.execute(
         text("SELECT id, title FROM chats WHERE id=:c AND user_id=:u"),
-        {"c": chat_id, "u": x_user_id},
+        {"c": chat_id, "u": user_id},
     ).mappings().first()
     if not chat:
         raise HTTPException(404, "Chat not found")
@@ -703,7 +711,7 @@ async def send_message(chat_id: str, req: MessageCreateRequest, sess=Depends(db)
                 WHERE chat_id=:c AND user_id=:u
                 ORDER BY created_at DESC
                 LIMIT 20"""),
-        {"c": chat_id, "u": x_user_id},
+        {"c": chat_id, "u": user_id},
     ).mappings().all()
 
     # Reverse to chronological order (oldest first for AI context)
@@ -928,7 +936,7 @@ def list_messages(chat_id: str, sess=Depends(db), user_id: str = Depends(get_use
     rows = sess.execute(
         text("""SELECT id, role, content, attachments_json, created_at
                 FROM messages WHERE chat_id=:c AND user_id=:u ORDER BY created_at ASC"""),
-        {"c": chat_id, "u": x_user_id},
+        {"c": chat_id, "u": user_id},
     ).mappings().all()
     out = []
     for r in rows:
@@ -949,7 +957,7 @@ async def stream_message(chat_id: str, req: MessageCreateRequest, sess=Depends(d
     # (1) Verify chat exists
     chat = sess.execute(
         text("SELECT id, title FROM chats WHERE id=:c AND user_id=:u"),
-        {"c": chat_id, "u": x_user_id},
+        {"c": chat_id, "u": user_id},
     ).mappings().first()
     if not chat:
         raise HTTPException(404, "Chat not found")
@@ -960,7 +968,7 @@ async def stream_message(chat_id: str, req: MessageCreateRequest, sess=Depends(d
                 WHERE chat_id=:c AND user_id=:u
                 ORDER BY created_at DESC
                 LIMIT 20"""),
-        {"c": chat_id, "u": x_user_id},
+        {"c": chat_id, "u": user_id},
     ).mappings().all()
     conversation_history = [{"role": r["role"], "content": r["content"]} for r in reversed(history_rows)]
 
@@ -1034,7 +1042,7 @@ async def stream_message(chat_id: str, req: MessageCreateRequest, sess=Depends(d
     }
 
     # Store references for the generator closure
-    user_id_ref = x_user_id
+    user_id_ref = user_id
     chat_id_ref = chat_id
     is_first_message = len(conversation_history) == 0 and chat["title"] == "New Chat"
     user_content = req.content
@@ -1174,7 +1182,7 @@ def create_app(req: AppCreateRequest, sess=Depends(db), user_id: str = Depends(g
     now = datetime.utcnow()
     sess.execute(
         text("INSERT INTO apps (id, user_id, name, icon_emoji, launch_url, created_at) VALUES (:id,:u,:n,:i,:url,:t)"),
-        {"id": aid, "u": x_user_id, "n": req.name, "i": req.icon_emoji, "url": req.launch_url, "t": now},
+        {"id": aid, "u": user_id, "n": req.name, "i": req.icon_emoji, "url": req.launch_url, "t": now},
     )
     sess.commit()
     return {"id": aid, "name": req.name, "icon_emoji": req.icon_emoji, "launch_url": req.launch_url, "created_at": now}
@@ -1187,20 +1195,73 @@ def list_apps(sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     ).mappings().all()
     return [dict(r) for r in rows]
 
+@app.post("/apps/provision-defaults")
+def provision_default_apps_endpoint(sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
+    """Provision default apps for existing users who don't have them."""
+    # Check which default apps the user already has
+    existing_apps = sess.execute(
+        text("SELECT name FROM apps WHERE user_id=:u"),
+        {"u": user_id},
+    ).mappings().all()
+    existing_names = {r["name"] for r in existing_apps}
+    
+    apps_to_create = [app for app in DEFAULT_APPS if app["name"] not in existing_names]
+    
+    if not apps_to_create:
+        return {"message": "All default apps already exist", "created": []}
+    
+    created = []
+    import os as os_module
+    default_apps_dir = os_module.path.join(os_module.path.dirname(__file__), 'default_apps')
+    
+    for app_def in apps_to_create:
+        try:
+            js_path = os_module.path.join(default_apps_dir, app_def['js_file'])
+            if not os_module.path.exists(js_path):
+                continue
+            
+            with open(js_path, 'r', encoding='utf-8') as f:
+                js_code = f.read()
+            
+            aid = "a_" + uuid.uuid4().hex
+            now = datetime.utcnow()
+            sess.execute(
+                text("INSERT INTO apps (id, user_id, name, icon_emoji, launch_url, created_at) VALUES (:id,:u,:n,:i,:url,:t)"),
+                {"id": aid, "u": user_id, "n": app_def['name'], "i": app_def['icon_emoji'], "url": None, "t": now},
+            )
+            
+            html = APP_HTML_SHELL.replace("__APP_JS__", js_code)
+            vid = "v_" + uuid.uuid4().hex
+            s3_key = f"{user_id}/apps/{aid}/{vid}/index.html"
+            s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=html.encode("utf-8"), ContentType="text/html")
+            
+            sess.execute(
+                text("""INSERT INTO app_versions (id, app_id, user_id, prompt, s3_key, created_at)
+                        VALUES (:id,:app_id,:u,:p,:s3,:t)"""),
+                {"id": vid, "app_id": aid, "u": user_id, "p": app_def['prompt'], "s3": s3_key, "t": now},
+            )
+            created.append(app_def['name'])
+        except Exception as e:
+            print(f"Error creating default app {app_def['name']}: {e}")
+            continue
+    
+    sess.commit()
+    return {"message": f"Created {len(created)} default app(s)", "created": created}
+
 @app.get("/apps/{app_id}/versions")
 def list_app_versions(app_id: str, sess=Depends(db), user_id: str = Depends(get_user_id_from_token)):
     """List all versions of an app."""
     # Verify app ownership
     app_row = sess.execute(
         text("SELECT id FROM apps WHERE id=:a AND user_id=:u"),
-        {"a": app_id, "u": x_user_id},
+        {"a": app_id, "u": user_id},
     ).first()
     if not app_row:
         raise HTTPException(404, "App not found")
 
     rows = sess.execute(
         text("SELECT id, prompt, created_at FROM app_versions WHERE app_id=:a AND user_id=:u ORDER BY created_at ASC"),
-        {"a": app_id, "u": x_user_id},
+        {"a": app_id, "u": user_id},
     ).mappings().all()
     return [{"id": r["id"], "prompt": r["prompt"], "created_at": r["created_at"]} for r in rows]
 
@@ -1298,6 +1359,66 @@ def clean_generated_js(js_code: str) -> str:
     return code.strip()
 
 
+
+
+# ---------- Default Apps Provisioning ----------
+# Define default apps that are created for new users
+DEFAULT_APPS = [
+    {
+        'name': 'Spark Analyzer',
+        'icon_emoji': '📊',
+        'js_file': 'spark_analyzer.js',
+        'prompt': 'Analyze Spark delivery offers to find the most profitable ones, accounting for gas, mileage, and wear costs.',
+    },
+]
+
+def provision_default_apps(sess, user_id: str):
+    """Create default apps for a new user."""
+    import os
+    default_apps_dir = os.path.join(os.path.dirname(__file__), 'default_apps')
+    
+    for app_def in DEFAULT_APPS:
+        try:
+            # Load the JS file
+            js_path = os.path.join(default_apps_dir, app_def['js_file'])
+            if not os.path.exists(js_path):
+                print(f"Warning: Default app JS not found: {js_path}")
+                continue
+            
+            with open(js_path, 'r', encoding='utf-8') as f:
+                js_code = f.read()
+            
+            # Create app record
+            aid = "a_" + uuid.uuid4().hex
+            now = datetime.utcnow()
+            sess.execute(
+                text("INSERT INTO apps (id, user_id, name, icon_emoji, launch_url, created_at) VALUES (:id,:u,:n,:i,:url,:t)"),
+                {"id": aid, "u": user_id, "n": app_def['name'], "i": app_def['icon_emoji'], "url": None, "t": now},
+            )
+            
+            # Create HTML with the JS
+            html = APP_HTML_SHELL.replace("__APP_JS__", js_code)
+            
+            # Upload to S3
+            vid = "v_" + uuid.uuid4().hex
+            s3_key = f"{user_id}/apps/{aid}/{vid}/index.html"
+            s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=html.encode("utf-8"), ContentType="text/html")
+            
+            # Create version record
+            sess.execute(
+                text("""INSERT INTO app_versions (id, app_id, user_id, prompt, s3_key, created_at)
+                        VALUES (:id,:app_id,:u,:p,:s3,:t)"""),
+                {"id": vid, "app_id": aid, "u": user_id, "p": app_def['prompt'], "s3": s3_key, "t": now},
+            )
+            
+            print(f"Provisioned default app '{app_def['name']}' for user {user_id}")
+        except Exception as e:
+            print(f"Error provisioning default app {app_def['name']}: {e}")
+            # Don't fail registration if default app creation fails
+            continue
+    
+    sess.commit()
+
 async def claude_generate_app_js(prompt: str) -> str:
     if not ANTHROPIC_API_KEY:
         return "document.getElementById('app').innerText='Claude key not configured.';"
@@ -1347,7 +1468,7 @@ async def generate_app(req: AppGenerateRequest, sess=Depends(db), user_id: str =
     # Verify app ownership
     row = sess.execute(
         text("SELECT id FROM apps WHERE id=:a AND user_id=:u"),
-        {"a": req.app_id, "u": x_user_id},
+        {"a": req.app_id, "u": user_id},
     ).first()
     if not row:
         raise HTTPException(404, "App not found")
@@ -1363,7 +1484,7 @@ async def generate_app(req: AppGenerateRequest, sess=Depends(db), user_id: str =
     sess.execute(
         text("""INSERT INTO app_versions (id, app_id, user_id, prompt, s3_key, created_at)
                 VALUES (:id,:app_id,:u,:p,:s3,:t)"""),
-        {"id": vid, "app_id": req.app_id, "u": x_user_id, "p": req.prompt, "s3": s3_key, "t": now},
+        {"id": vid, "app_id": req.app_id, "u": user_id, "p": req.prompt, "s3": s3_key, "t": now},
     )
     sess.commit()
 
@@ -1374,7 +1495,7 @@ def serve_app_html(app_id: str, version_id: str, sess=Depends(db), user_id: str 
     row = sess.execute(
         text("""SELECT s3_key FROM app_versions
                 WHERE id=:v AND app_id=:a AND user_id=:u"""),
-        {"v": version_id, "a": app_id, "u": x_user_id},
+        {"v": version_id, "a": app_id, "u": user_id},
     ).mappings().first()
     if not row:
         raise HTTPException(404, "Version not found")
