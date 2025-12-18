@@ -101,6 +101,40 @@ export default function ModalScreen() {
             </Text>
           </Pressable>
         </View>
+        <View style={styles.tipsBox}>
+          <Text style={styles.tipsTitle}>Tips & Tricks</Text>
+          {isExternal ? (
+            <>
+              <Text style={styles.tipItem}>
+                Use deep links to open apps directly (e.g., spotify://album/123)
+              </Text>
+              <Text style={styles.tipItem}>
+                Standard URLs work too (e.g., https://notion.so/mypage)
+              </Text>
+              <Text style={styles.tipItem}>
+                Common deep links: twitter://, instagram://, slack://, discord://
+              </Text>
+              <Text style={styles.tipItem}>
+                Search "[app name] URL scheme" to find deep link formats
+              </Text>
+            </>
+          ) : (
+            <>
+              <Text style={styles.tipItem}>
+                Be specific: "A workout tracker with sets, reps, and rest timers"
+              </Text>
+              <Text style={styles.tipItem}>
+                Mention data you want to track: "daily water intake in glasses"
+              </Text>
+              <Text style={styles.tipItem}>
+                Include features: "with charts, reminders, and streak tracking"
+              </Text>
+              <Text style={styles.tipItem}>
+                Example: "A habit tracker where I can check off daily habits and see my weekly progress"
+              </Text>
+            </>
+          )}
+        </View>
 
         <Text style={styles.label}>App Name</Text>
         <TextInput
@@ -195,7 +229,7 @@ const createStyles = (isDark: boolean) =>
     },
     toggleRow: {
       flexDirection: 'row',
-      marginBottom: 24,
+      marginBottom: 16,
       justifyContent: 'center',
       gap: 12,
     },
@@ -217,6 +251,26 @@ const createStyles = (isDark: boolean) =>
     toggleTextActive: {
       color: '#007AFF',
       fontWeight: '600',
+    },
+    tipsBox: {
+      backgroundColor: isDark ? '#1c1c1e' : '#f5f5f5',
+      borderRadius: 10,
+      padding: 14,
+      marginBottom: 20,
+      borderWidth: 1,
+      borderColor: isDark ? '#333' : '#e0e0e0',
+    },
+    tipsTitle: {
+      fontSize: 14,
+      fontWeight: '700',
+      color: isDark ? '#fff' : '#333',
+      marginBottom: 10,
+    },
+    tipItem: {
+      fontSize: 13,
+      color: isDark ? '#aaa' : '#555',
+      lineHeight: 20,
+      marginBottom: 6,
     },
     label: {
       fontSize: 14,
