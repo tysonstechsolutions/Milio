@@ -12,10 +12,10 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, router } from 'expo-router';
-import { getApps, AppItem } from '@/lib/api';
+import { getApps, App } from '@/lib/api';
 
 export default function AppsScreen() {
-  const [apps, setApps] = useState<AppItem[]>([]);
+  const [apps, setApps] = useState<App[]>([]);
   const [loading, setLoading] = useState(true);
   const colorScheme = useColorScheme();
   const isDark = colorScheme === 'dark';
@@ -39,7 +39,7 @@ export default function AppsScreen() {
     }, [loadApps])
   );
 
-  function openApp(item: AppItem) {
+  function openApp(item: App) {
     if (item.launch_url) {
       // External app or web link
       if (item.launch_url.startsWith('http')) {

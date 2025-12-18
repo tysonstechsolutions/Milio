@@ -1361,16 +1361,22 @@ def clean_generated_js(js_code: str) -> str:
 
 
 
-# ---------- Default Apps Provisioning ----------
-# Define default apps that are created for new users
-DEFAULT_APPS = [
+# ---------- App Library ----------
+# Pre-built apps available for users to add from the library
+APP_LIBRARY = [
     {
+        'id': 'spark-analyzer',
         'name': 'Spark Analyzer',
         'icon_emoji': '📊',
         'js_file': 'spark_analyzer.js',
-        'prompt': 'Analyze Spark delivery offers to find the most profitable ones, accounting for gas, mileage, and wear costs.',
+        'description': 'Analyze Spark delivery offers to find the most profitable ones. Calculates true profit after gas, mileage, and vehicle wear costs.',
+        'category': 'Gig Work',
+        'tags': ['delivery', 'spark', 'profit', 'calculator'],
     },
 ]
+
+# Keep DEFAULT_APPS for backwards compatibility
+DEFAULT_APPS = APP_LIBRARY
 
 def provision_default_apps(sess, user_id: str):
     """Create default apps for a new user."""

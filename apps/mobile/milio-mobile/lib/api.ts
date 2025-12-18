@@ -476,6 +476,59 @@ export async function generateApp(appId: string, prompt: string): Promise<{ url:
   return response.json();
 }
 
+// ============ App Library API ============
+
+export interface LibraryApp {
+  id: string;
+  name: string;
+  icon_emoji: string;
+  description: string;
+  category: string;
+  tags: string[];
+  installed: boolean;
+}
+
+export async function getLibrary(): Promise<LibraryApp[]> {
+  const response = await apiFetch('/library');
+
+  if (!response.ok) {
+    throw await parseApiError(response);
+  }
+
+  return response.json();
+}
+
+export async function addLibraryApp(libraryAppId: string): Promise<{
+  message: string;
+  app_id: string;
+  name: string;
+  icon_emoji: string;
+}> {
+  const response = await apiFetch(, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    throw await parseApiError(response);
+  }
+
+  return response.json();
+}
+
+export async function getAppVersions(appId: string): Promise<{
+  id: string;
+  prompt: string;
+  created_at: string;
+}[]> {
+  const response = await apiFetch();
+
+  if (!response.ok) {
+    throw await parseApiError(response);
+  }
+
+  return response.json();
+}
+
 // ============ Exports ============
 
 export { API_URL };
